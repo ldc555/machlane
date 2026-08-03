@@ -5,6 +5,7 @@ dependencies:
   - python=3.11
   - numpy<2.3
   - scipy
+  - scikit-learn
   - pandas
   - openpyxl
   - pydantic>=2

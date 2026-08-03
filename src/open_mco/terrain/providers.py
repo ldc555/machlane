@@ -6,6 +6,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
+from pyproj import Geod
+
 from open_mco.aircraft.loader import sha256_file
 from open_mco.models import RouteSegment, TerrainProfile, TerrainSourceMetadata
 
@@ -45,17 +48,65 @@ class FlatTerrainProvider:
 class USGS3DEPProvider:
     name = "usgs_3dep"
 
-    def __init__(self, *, network_enabled: bool = False, resolution_m: float = 10.0) -> None:
+    def __init__(
+        self,
+        *,
+        network_enabled: bool = False,
+        resolution_m: float = 10.0,
+        sample_spacing_m: float = 1_000.0,
+    ) -> None:
+        if resolution_m <= 0 or sample_spacing_m <= 0:
+            raise ValueError("terrain resolution and sample spacing must be positive")
         self.network_enabled = network_enabled
         self.resolution_m = resolution_m
+        self.sample_spacing_m = sample_spacing_m
 
     def profile(self, segment: RouteSegment) -> TerrainProfile:
         if not self.network_enabled:
             raise RuntimeError(
                 "USGS 3DEP access is disabled; rerun an explicit fetch command to use py3dep"
             )
-        raise NotImplementedError(
-            "3DEP sampling is an adapter extension point; no network call was made"
+        try:
+            import py3dep  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise RuntimeError("install MachLane's 'full' extra for USGS 3DEP access") from exc
+        geod = Geod(ellps="WGS84")
+        sample_count = max(2, int(np.ceil(segment.distance_m / self.sample_spacing_m)) + 1)
+        interior = (
+            []
+            if sample_count == 2
+            else geod.npts(
+                segment.start_longitude,
+                segment.start_latitude,
+                segment.end_longitude,
+                segment.end_latitude,
+                sample_count - 2,
+            )
+        )
+        coordinates = [
+            (segment.start_longitude, segment.start_latitude),
+            *interior,
+            (segment.end_longitude, segment.end_latitude),
+        ]
+        elevations = np.asarray(py3dep.elevation_bycoords(coordinates, crs=4326), dtype=float)
+        if elevations.size != sample_count or not np.all(np.isfinite(elevations)):
+            raise ValueError("3DEP returned missing or misaligned elevation samples")
+        distances = np.linspace(0.0, segment.distance_m, sample_count)
+        return TerrainProfile(
+            distance_m=tuple(float(value) for value in distances),
+            elevation_m=tuple(float(value) for value in elevations),
+            latitude=tuple(float(latitude) for _, latitude in coordinates),
+            longitude=tuple(float(longitude) for longitude, _ in coordinates),
+            source=TerrainSourceMetadata(
+                provider=self.name,
+                resolution_m=self.resolution_m,
+                horizontal_datum="WGS84",
+                vertical_datum="3DEP service elevation datum; verify response metadata for case",
+                interpolation=f"point query every {self.sample_spacing_m:g} m via elevation_bycoords",
+                retrieved_at=datetime.now(UTC),
+                source_url="https://www.usgs.gov/3d-elevation-program",
+                label="REAL_USGS_DATA_UNVALIDATED_FOR_OPERATIONAL_USE",
+            ),
         )
 
 

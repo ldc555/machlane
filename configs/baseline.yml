@@ -2,7 +2,7 @@ aircraft:
   path: aircraft_database/NASA_STCA_55T/NASA_STCA_55T_Aircraft.xlsx
 route:
   waypoint_file: data/examples/route.csv
-  segment_spacing_km: 25
+  segment_spacing_km: 100
 weather:
   provider: synthetic
   reliability: 0.95
@@ -13,4 +13,3 @@ propagation:
 planner:
   mach_values: [1.02, 1.05, 1.08, 1.10, 1.12, 1.15]
   altitude_ft: [40000, 42000, 44000, 46000, 48000, 50000]
-

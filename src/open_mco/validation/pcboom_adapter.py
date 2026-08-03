@@ -47,7 +47,8 @@ class PCBoomAdapter:
         """Compare declared classifications and metrics without deciding regulatory validity."""
 
         return {
-            "classification_match": fast_result.get("classification") == pcboom_result.get("classification"),
+            "classification_match": fast_result.get("classification")
+            == pcboom_result.get("classification"),
             "fast_result": fast_result,
             "pcboom_result": pcboom_result,
             "validation_status": "REVIEW_REQUIRED",

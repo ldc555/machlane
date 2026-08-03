@@ -179,7 +179,10 @@ PCBoom is not bundled or redistributed. Access requires a separate NASA software
 
 ### Operational U.S. forecast
 
-**HRRR** is the initial nominal forecast source for the conterminous United States.
+**HRRR** is the initial nominal forecast source for the conterminous United States. The
+`fetch-weather` command retrieves a pressure-level subset through Herbie only when explicitly
+invoked, then writes a normalized profile with its model cycle, valid time, source URL, and local
+GRIB checksum. The default demo never contacts the network.
 
 Required upper-air variables include, at minimum:
 
@@ -191,17 +194,22 @@ Required upper-air variables include, at minimum:
 
 ### Forecast uncertainty
 
-**GEFS** provides multiple forecast members. The first implementation treats member outcomes as an empirical scenario distribution.
+**GEFS** provides multiple forecast members. The same explicit fetch path accepts a declared
+member and records it in the source request. The first planning implementation treats member
+outcomes as an empirical scenario distribution.
 
 A high fraction of passing ensemble members must not automatically be described as validated 95% regulatory reliability. Ensemble calibration, dependence, model error, representativeness, and conservative margin selection require separate justification.
 
 ### Historical development
 
-**ERA5** is used for repeatable historical cases and back-testing. It is not the sole operational forecast source.
+**ERA5** is intended for repeatable historical cases and back-testing. CDS retrieval is still an
+explicit adapter gap: MachLane will not imply that credentials alone make the path operational.
+Use HRRR/GEFS or a separately reviewed local ERA5 export until the adapter is completed.
 
 ### Terrain
 
-Use **USGS 3DEP** for U.S. routes. Preserve:
+Use **USGS 3DEP** for U.S. routes. `fetch-terrain` samples one declared route leg through Py3DEP
+and serializes the normalized terrain profile. Preserve:
 
 - product and resolution;
 - horizontal datum;
@@ -210,6 +218,19 @@ Use **USGS 3DEP** for U.S. routes. Preserve:
 - source tile or service;
 - interpolation method;
 - checksum when stored locally.
+
+### Adapter readiness
+
+| Source | Retrieval | Verification boundary |
+|---|---|---|
+| NOAA HRRR | Implemented through Herbie | Live historical pressure-profile fetch completed; not planner-validated |
+| NOAA GEFS | Implemented through Herbie, including member identity | Live `p01` pressure-profile fetch completed; common native levels only |
+| USGS 3DEP | Implemented through Py3DEP | Unit-tested; requires the conda/GDAL environment for a live fetch |
+| ERA5 | Not implemented | CDS credentials and reviewed retrieval design still required |
+| NOAA RRFS/REFS | Not implemented | Track the [announced October 2026 production transition](https://www.weather.gov/notification/) |
+
+These statuses describe data ingestion only. No source in this table turns the mock propagation
+result into an operational or compliance determination.
 
 ## 9. Aircraft database
 
@@ -288,7 +309,13 @@ python -m cfgrib selfcheck
 ### Install the package
 
 ```bash
-pip install -e .
+pip install -e ".[ui]"
+```
+
+Install the real weather and terrain adapters only when they are needed:
+
+```bash
+pip install -e ".[full]"
 ```
 
 ### Validate the aircraft workbook
@@ -305,6 +332,10 @@ open-mco demo
 
 ### Open the user interface
 
+The map-first workspace keeps the synthetic aircraft, route corridor, active-segment recommendation,
+engineering plots, validation state, provenance, and evidence generation in one screen. Moving the
+aircraft updates the inspector without recomputing the cached route plan.
+
 ```bash
 open-mco ui
 ```
@@ -314,6 +345,39 @@ or:
 ```bash
 streamlit run src/open_mco/ui/app.py
 ```
+
+### Fetch reviewed real-data inputs
+
+Real-data retrieval is a separate, explicit step. It never silently replaces the synthetic demo.
+
+```bash
+open-mco fetch-weather \
+  --provider hrrr \
+  --latitude 39.8561 \
+  --longitude -104.6737 \
+  --valid-time 2026-08-03T12:00:00+0000 \
+  --forecast-hour 0 \
+  --output data/processed/hrrr_denver.json
+
+open-mco fetch-weather \
+  --provider gefs \
+  --latitude 39.8561 \
+  --longitude -104.6737 \
+  --valid-time 2026-08-03T12:00:00+0000 \
+  --forecast-hour 0 \
+  --member 1 \
+  --output data/processed/gefs_p01_denver.json
+
+open-mco fetch-terrain \
+  --start-latitude 39.8561 --start-longitude -104.6737 \
+  --end-latitude 38.7487 --end-longitude -90.3700 \
+  --sample-spacing-m 1000 \
+  --output data/processed/denver_st_louis_terrain.json
+```
+
+Each weather command downloads only the requested GRIB pressure-level fields, not a whole model
+file. Large source files and generated profiles stay out of Git. HRRR, GEFS, and 3DEP are fetch
+paths; they are not yet wired into an end-to-end validated planner run. ERA5 remains unimplemented.
 
 ### Run quality checks
 
@@ -333,7 +397,7 @@ aircraft:
 
 route:
   waypoint_file: data/examples/route.csv
-  segment_spacing_km: 25
+  segment_spacing_km: 100
 
 weather:
   provider: synthetic
@@ -350,7 +414,9 @@ planner:
   altitude_ft: [40000, 42000, 44000, 46000, 48000, 50000]
 ```
 
-The default configuration must remain synthetic and network-free so contributors can run the full repository immediately.
+The example route runs from Seattle to New York through nine U.S. waypoints. The default
+configuration remains synthetic and network-free so contributors can run the full repository
+immediately.
 
 ## 13. CLI
 

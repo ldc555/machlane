@@ -64,6 +64,8 @@ class AircraftModel(FrozenModel):
 class AtmosphericSourceMetadata(FrozenModel):
     provider: str
     model_cycle: datetime | None = None
+    forecast_hour: int | None = None
+    ensemble_member: str | None = None
     valid_time: datetime
     variables: tuple[str, ...]
     horizontal_interpolation: str

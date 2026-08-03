@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,11 +10,34 @@ import pandas as pd
 
 from open_mco.atmosphere import SyntheticAtmosphereProvider
 from open_mco.compliance import write_evidence_package
-from open_mco.models import AircraftModel, AircraftOperatingLimits, Route, SourcedValue
+from open_mco.models import (
+    AircraftModel,
+    AircraftOperatingLimits,
+    AtmosphericProfile,
+    PlannerResult,
+    Route,
+    SourcedValue,
+    TerrainProfile,
+)
 from open_mco.optimization import GridSearchPlanner
 from open_mco.physics import MockMCOEngine
 from open_mco.route import route_from_waypoints
 from open_mco.terrain import FlatTerrainProvider
+
+DEMO_VALID_TIME = datetime(2026, 8, 3, 12, tzinfo=UTC)
+DEMO_MACH_VALUES = (1.02, 1.05, 1.08, 1.10, 1.12, 1.15)
+DEMO_ALTITUDES_M = (12_192, 12_802, 13_411, 14_021, 14_630, 15_240)
+
+
+@dataclass(frozen=True)
+class DemoScenario:
+    """The single normalized scenario shared by CLI, UI, reports, and tests."""
+
+    aircraft: AircraftModel
+    route: Route
+    result: PlannerResult
+    atmosphere: AtmosphericProfile
+    terrain: TerrainProfile
 
 
 def _synthetic_value(value: float | str, unit: str) -> SourcedValue:
@@ -49,40 +73,55 @@ def synthetic_aircraft() -> AircraftModel:
     )
 
 
-def demo_route(csv_path: str | Path = "data/examples/route.csv") -> Route:
+def demo_route(
+    csv_path: str | Path = "data/examples/route.csv", *, spacing_m: float = 100_000
+) -> Route:
     frame = pd.read_csv(csv_path)
     waypoints = list(zip(frame["latitude"], frame["longitude"], strict=True))
-    return route_from_waypoints(waypoints, spacing_m=25_000, name="Synthetic U.S. demo route")
+    return route_from_waypoints(
+        waypoints, spacing_m=spacing_m, name="Transcontinental U.S. research route"
+    )
 
 
-def run_demo(*, results_root: str | Path = "results") -> Path:
-    """Run the complete synthetic path and return its evidence-package directory."""
+def build_demo_scenario() -> DemoScenario:
+    """Build the deterministic scenario once for any presentation or export surface."""
 
     aircraft = synthetic_aircraft()
     route = demo_route()
+    weather = SyntheticAtmosphereProvider()
+    terrain_provider = FlatTerrainProvider()
     planner = GridSearchPlanner(
-        atmosphere_provider=SyntheticAtmosphereProvider(),
-        terrain_provider=FlatTerrainProvider(),
+        atmosphere_provider=weather,
+        terrain_provider=terrain_provider,
         propagation_engine=MockMCOEngine(),
     )
     result = planner.plan(
         aircraft,
         route,
-        mach_values=[1.02, 1.05, 1.08, 1.10, 1.12, 1.15],
-        altitude_m=[12_192, 12_802, 13_411, 14_021, 14_630, 15_240],
+        mach_values=list(DEMO_MACH_VALUES),
+        altitude_m=list(DEMO_ALTITUDES_M),
         reliability_level=0.95,
-        valid_time=datetime(2026, 8, 3, 12, tzinfo=UTC),
+        valid_time=DEMO_VALID_TIME,
     )
-    atmosphere = SyntheticAtmosphereProvider().profile(
-        37.0, -96.0, datetime(2026, 8, 3, 12, tzinfo=UTC)
-    )
-    terrain = FlatTerrainProvider().profile(route.segments[0])
-    return write_evidence_package(
+    return DemoScenario(
         aircraft=aircraft,
         route=route,
         result=result,
-        atmosphere_source=atmosphere.source,
-        terrain_source=terrain.source,
+        atmosphere=weather.profile(37.0, -96.0, DEMO_VALID_TIME),
+        terrain=terrain_provider.profile(route.segments[0]),
+    )
+
+
+def run_demo(*, results_root: str | Path = "results") -> Path:
+    """Run the complete synthetic path and return its evidence-package directory."""
+
+    scenario = build_demo_scenario()
+    return write_evidence_package(
+        aircraft=scenario.aircraft,
+        route=scenario.route,
+        result=scenario.result,
+        atmosphere_source=scenario.atmosphere.source,
+        terrain_source=scenario.terrain.source,
         configuration_path=Path("configs/baseline.yml"),
         results_root=Path(results_root),
     )
