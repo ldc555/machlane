@@ -24,7 +24,7 @@ data/cache/*
 !data/cache/.gitkeep
 results/*
 !results/.gitkeep
-pcboom*
-PCBoom*
+/PCBoom*
+pcboom_staging/
+*.pcboom.out
 ~$*.xlsx
-
