@@ -8,6 +8,6 @@ engine only for integration. Do not implement physics until a cited source and h
 
 ## 2026-08-03 — Keep external projects as dependencies
 
-Herbie, xarray/cfgrib/ecCodes, Py3DEP/rasterio, GeoPandas/Shapely/PyProj and visualization tools are
-package-manager dependencies. No upstream repository is copied or forked. PCBoom remains external.
-
+Herbie, xarray/cfgrib/ecCodes, official USGS services/rasterio,
+GeoPandas/Shapely/PyProj and visualization tools are package-manager dependencies. No upstream
+repository is copied or forked. PCBoom remains external.

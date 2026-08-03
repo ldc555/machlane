@@ -25,7 +25,7 @@ st.markdown(
 :root { --ink:#e5eef8; --muted:#8ba0b7; --panel:#101a27; --line:#233247; --teal:#2dd4bf; }
 .stApp { background: radial-gradient(circle at 50% -20%, #18283b 0, #0a111b 42%, #070c13 100%); color:var(--ink); }
 [data-testid="stHeader"] { background:transparent; }
-[data-testid="stToolbar"] { right:1rem; }
+[data-testid="stToolbar"], [data-testid="stStatusWidget"] { display:none; }
 .block-container { max-width:1600px; padding:1rem 1.5rem 3rem; }
 h1,h2,h3 { letter-spacing:-.02em; }
 .brand-row { display:flex; align-items:center; justify-content:space-between; margin:.15rem 0 .75rem; }
@@ -157,7 +157,7 @@ with workspace:
     st.pydeck_chart(
         pdk.Deck(
             layers=map_layers,
-            map_style=None,
+            map_style=pdk.map_styles.CARTO_DARK,
             initial_view_state=pdk.ViewState(
                 latitude=39.2, longitude=-98.0, zoom=3.15, pitch=12, bearing=0
             ),
@@ -281,7 +281,11 @@ with evidence_tab:
                     "State": "FETCH READY",
                     "Use": "Explicit route-leg profile",
                 },
-                {"Source": "ERA5", "State": "ADAPTER GAP", "Use": "Reviewed local export only"},
+                {
+                    "Source": "ERA5",
+                    "State": "FETCH READY",
+                    "Use": "Historical · CDS credentials",
+                },
             ]
         ),
         hide_index=True,

@@ -12,7 +12,12 @@ import typer
 import yaml
 
 from open_mco.aircraft import AircraftWorkbookError, load_aircraft_workbook
-from open_mco.atmosphere import AtmosphereProvider, HerbieGEFSProvider, HerbieHRRRProvider
+from open_mco.atmosphere import (
+    AtmosphereProvider,
+    ERA5Provider,
+    HerbieGEFSProvider,
+    HerbieHRRRProvider,
+)
 from open_mco.demo import run_demo
 from open_mco.route import route_from_waypoints
 from open_mco.terrain import USGS3DEPProvider
@@ -80,22 +85,21 @@ def fetch_weather(
     normalized = provider.lower()
     if normalized not in {"hrrr", "gefs", "era5"}:
         raise typer.BadParameter("provider must be hrrr, gefs, or era5")
-    if normalized == "era5":
-        typer.echo(
-            "No data downloaded. ERA5 CDS retrieval is not implemented; configure ~/.cdsapirc "
-            "and use a reviewed local export until that adapter is completed.",
-            err=True,
-        )
-        raise typer.Exit(2)
     if normalized == "hrrr":
         weather: AtmosphereProvider = HerbieHRRRProvider(
             network_enabled=True, forecast_hour=forecast_hour
         )
-    else:
+    elif normalized == "gefs":
         weather = HerbieGEFSProvider(
             network_enabled=True, forecast_hour=forecast_hour, member=member
         )
-    profile = weather.profile(latitude, longitude, valid_time)
+    else:
+        weather = ERA5Provider(network_enabled=True)
+    try:
+        profile = weather.profile(latitude, longitude, valid_time)
+    except (RuntimeError, ValueError, OSError) as exc:
+        typer.echo(f"Weather fetch failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(profile.model_dump_json(indent=2), encoding="utf-8")
     typer.echo(
@@ -119,9 +123,13 @@ def fetch_terrain(
         spacing_m=10_000_000,
         name="terrain fetch leg",
     )
-    terrain = USGS3DEPProvider(network_enabled=True, sample_spacing_m=sample_spacing_m).profile(
-        route.segments[0]
-    )
+    try:
+        terrain = USGS3DEPProvider(network_enabled=True, sample_spacing_m=sample_spacing_m).profile(
+            route.segments[0]
+        )
+    except (RuntimeError, ValueError, OSError) as exc:
+        typer.echo(f"Terrain fetch failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(terrain.model_dump_json(indent=2), encoding="utf-8")
     typer.echo(f"Wrote USGS 3DEP profile with {len(terrain.distance_m)} samples to {output}")

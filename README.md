@@ -148,7 +148,7 @@ The project uses packages as dependencies. **Do not fork or copy their source co
 ### Terrain and geospatial
 
 - [USGS 3DEP](https://www.usgs.gov/3d-elevation-program) — U.S. terrain source.
-- [Py3DEP](https://github.com/hyriver/py3dep) — Python access to 3DEP services.
+- [USGS Elevation web services](https://www.usgs.gov/the-national-map-data-delivery/gis-data-download) — direct 3DEP route and point sampling without a GIS runtime.
 - [Rasterio](https://github.com/rasterio/rasterio) — raster/GeoTIFF processing.
 - [PyProj](https://github.com/pyproj4/pyproj) — coordinate transformations and geodesics.
 - [Shapely](https://github.com/shapely/shapely) — geometry operations.
@@ -202,14 +202,14 @@ A high fraction of passing ensemble members must not automatically be described 
 
 ### Historical development
 
-**ERA5** is intended for repeatable historical cases and back-testing. CDS retrieval is still an
-explicit adapter gap: MachLane will not imply that credentials alone make the path operational.
-Use HRRR/GEFS or a separately reviewed local ERA5 export until the adapter is completed.
+**ERA5** is used for repeatable historical cases and back-testing. The explicit CDS retrieval path
+requires the contributor's own accepted dataset terms and `~/.cdsapirc` credentials; downloaded
+GRIB files are cached and checksummed like NOAA inputs.
 
 ### Terrain
 
-Use **USGS 3DEP** for U.S. routes. `fetch-terrain` samples one declared route leg through Py3DEP
-and serializes the normalized terrain profile. Preserve:
+Use **USGS 3DEP** for U.S. routes. `fetch-terrain` samples one declared route leg through official
+USGS cross-section and elevation-point services and serializes the normalized terrain profile.
 
 - product and resolution;
 - horizontal datum;
@@ -225,8 +225,8 @@ and serializes the normalized terrain profile. Preserve:
 |---|---|---|
 | NOAA HRRR | Implemented through Herbie | Live historical pressure-profile fetch completed; not planner-validated |
 | NOAA GEFS | Implemented through Herbie, including member identity | Live `p01` pressure-profile fetch completed; common native levels only |
-| USGS 3DEP | Implemented through Py3DEP | Unit-tested; requires the conda/GDAL environment for a live fetch |
-| ERA5 | Not implemented | CDS credentials and reviewed retrieval design still required |
+| USGS 3DEP | Implemented through official USGS HTTPS services | Live route-profile fetch completed; no GIS installation required |
+| ERA5 | Implemented through the CDS API | Credential-gated; test double verified because no CDS credentials are stored in the repository |
 | NOAA RRFS/REFS | Not implemented | Track the [announced October 2026 production transition](https://www.weather.gov/notification/) |
 
 These statuses describe data ingestion only. No source in this table turns the mock propagation
@@ -318,6 +318,12 @@ Install the real weather and terrain adapters only when they are needed:
 pip install -e ".[full]"
 ```
 
+Local GeoTIFF/raster workflows are deliberately separate from live 3DEP access:
+
+```bash
+pip install -e ".[gis]"
+```
+
 ### Validate the aircraft workbook
 
 ```bash
@@ -368,6 +374,13 @@ open-mco fetch-weather \
   --member 1 \
   --output data/processed/gefs_p01_denver.json
 
+open-mco fetch-weather \
+  --provider era5 \
+  --latitude 39.8561 \
+  --longitude -104.6737 \
+  --valid-time 2024-03-28T00:00:00+0000 \
+  --output data/processed/era5_denver.json
+
 open-mco fetch-terrain \
   --start-latitude 39.8561 --start-longitude -104.6737 \
   --end-latitude 38.7487 --end-longitude -90.3700 \
@@ -376,8 +389,9 @@ open-mco fetch-terrain \
 ```
 
 Each weather command downloads only the requested GRIB pressure-level fields, not a whole model
-file. Large source files and generated profiles stay out of Git. HRRR, GEFS, and 3DEP are fetch
-paths; they are not yet wired into an end-to-end validated planner run. ERA5 remains unimplemented.
+file. Large source files and generated profiles stay out of Git. HRRR, GEFS, ERA5, and 3DEP are
+fetch paths; they are not yet wired into an end-to-end validated planner run. ERA5 requires an
+accepted CDS dataset licence and the user's own `~/.cdsapirc`; credentials are never stored here.
 
 ### Run quality checks
 
