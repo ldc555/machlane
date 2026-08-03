@@ -1,0 +1,17 @@
+name: Physics or compliance proposal
+description: Propose a cited, reviewable model or interpretation change.
+body:
+  - type: textarea
+    id: basis
+    attributes:
+      label: Technical or regulatory basis
+      description: Provide primary-source citations, equations, units and coordinate conventions.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation cases and limitations
+    validations:
+      required: true
+

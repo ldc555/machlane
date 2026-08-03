@@ -1,0 +1,9 @@
+{
+  "label": "SYNTHETIC_NOT_FOR_ENGINEERING_USE",
+  "invariants": {
+    "engine_name": "mock_mco",
+    "absolute_overpressure_claim": "NOT_IMPLEMENTED",
+    "secondary_direct": "NOT_IMPLEMENTED",
+    "secondary_indirect": "NOT_IMPLEMENTED"
+  }
+}

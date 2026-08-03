@@ -1,0 +1,36 @@
+name: machlane
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy<2.3
+  - scipy
+  - pandas
+  - openpyxl
+  - pydantic>=2
+  - pint
+  - xarray
+  - cfgrib
+  - eccodes
+  - herbie-data
+  - rasterio
+  - rioxarray
+  - pyproj
+  - shapely
+  - geopandas
+  - py3dep
+  - pyyaml
+  - typer
+  - streamlit
+  - pydeck
+  - plotly
+  - jinja2
+  - pyarrow
+  - pytest
+  - pytest-cov
+  - hypothesis
+  - ruff
+  - mypy
+  - pip
+  - pip:
+      - -e .

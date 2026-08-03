@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "machlane"
+version = "0.1.0"
+description = "Open-source Mach-cutoff planning and compliance-evidence research tools"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "MachLane contributors" }]
+dependencies = [
+  "jinja2>=3.1",
+  "numpy>=1.26,<2.3",
+  "openpyxl>=3.1",
+  "pandas>=2.2",
+  "pint>=0.24",
+  "pyarrow>=16",
+  "pydantic>=2.8",
+  "pyproj>=3.6",
+  "pyyaml>=6.0",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+full = [
+  "cfgrib>=0.9.15", "eccodes>=2.38", "geopandas>=1.0", "herbie-data>=2025.1",
+  "plotly>=5.24", "py3dep>=0.18", "pydeck>=0.9", "rasterio>=1.4", "rioxarray>=0.18",
+  "scipy>=1.14", "shapely>=2.0", "streamlit>=1.40", "xarray>=2024.10",
+]
+dev = [
+  "hypothesis>=6.110", "mypy>=1.11", "pandas-stubs>=2.2", "pytest>=8.3",
+  "pytest-cov>=5.0", "ruff>=0.7", "types-openpyxl>=3.1", "types-pyyaml>=6.0",
+]
+
+[project.scripts]
+machlane = "open_mco.cli:app"
+open-mco = "open_mco.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/open_mco"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008", "E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["open_mco"]
+exclude = ["src/open_mco/ui/app.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --disable-warnings"
+
+[tool.coverage.run]
+source = ["open_mco"]
+omit = ["src/open_mco/ui/app.py", "src/open_mco/cli.py"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true

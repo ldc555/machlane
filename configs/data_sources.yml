@@ -1,0 +1,15 @@
+weather:
+  hrrr:
+    access: herbie
+    network_enabled: false
+  gefs:
+    access: herbie
+    network_enabled: false
+  era5:
+    access: copernicus_cds
+    network_enabled: false
+terrain:
+  usgs_3dep:
+    access: py3dep
+    network_enabled: false
+

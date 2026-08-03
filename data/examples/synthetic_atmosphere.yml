@@ -1,0 +1,7 @@
+label: SYNTHETIC_NOT_FOR_ENGINEERING_USE
+altitude_m: [0, 3000, 6000, 9000, 12000, 15000, 18000]
+temperature_k: [288.15, 268.65, 249.15, 229.65, 216.65, 216.65, 216.65]
+pressure_pa: [101325, 70109, 47181, 30742, 19399, 12045, 7505]
+zonal_wind_mps: [2, 5, 8, 12, 18, 22, 25]
+meridional_wind_mps: [1, 2, 3, 5, 8, 10, 12]
+
