@@ -24,11 +24,18 @@ def route_from_waypoints(
         raise ValueError("a route requires at least two waypoints")
     if spacing_m <= 0:
         raise ValueError("segment spacing must be positive")
+    for latitude, longitude in waypoints:
+        if not math.isfinite(latitude) or not math.isfinite(longitude):
+            raise ValueError("waypoint coordinates must be finite")
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            raise ValueError("waypoint coordinates must be valid WGS-84 latitude/longitude")
     segments: list[RouteSegment] = []
     for start, end in zip(waypoints, waypoints[1:], strict=False):
         lat1, lon1 = start
         lat2, lon2 = end
         bearing, _, distance = _GEOD.inv(lon1, lat1, lon2, lat2)
+        if distance <= 0:
+            raise ValueError("consecutive route waypoints must be distinct")
         pieces = max(1, math.ceil(distance / spacing_m))
         intermediate = [] if pieces == 1 else _GEOD.npts(lon1, lat1, lon2, lat2, pieces - 1)
         points = [(lon1, lat1), *intermediate, (lon2, lat2)]
@@ -65,6 +72,12 @@ def interpolate_position(route: Route, progress: float) -> tuple[float, float]:
         elapsed += segment.distance_m
     last = route.segments[-1]
     return last.end_latitude, last.end_longitude
+
+
+def route_distance_m(route: Route) -> float:
+    """Return the WGS-84 ellipsoidal distance along every route segment."""
+
+    return sum(segment.distance_m for segment in route.segments)
 
 
 def corridor_geojson(

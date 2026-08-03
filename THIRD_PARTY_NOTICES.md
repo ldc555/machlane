@@ -5,3 +5,6 @@ MachLane depends on separately distributed open-source packages listed in `pypro
 separate NASA software request and agreement. Public weather and terrain data retain their
 source terms and attribution requirements.
 
+Curated airport reference points are derived from OurAirports' public-domain data dump
+(https://ourairports.com/data/), retrieved 2026-08-03. OurAirports provides the data without a
+guarantee of accuracy or fitness for use.

@@ -147,6 +147,7 @@ The project uses packages as dependencies. **Do not fork or copy their source co
 
 ### Terrain and geospatial
 
+- [OurAirports open data](https://ourairports.com/data/) — public-domain airport reference points used by the curated mission catalog.
 - [USGS 3DEP](https://www.usgs.gov/3d-elevation-program) — U.S. terrain source.
 - [USGS Elevation web services](https://www.usgs.gov/the-national-map-data-delivery/gis-data-download) — direct 3DEP route and point sampling without a GIS runtime.
 - [Rasterio](https://github.com/rasterio/rasterio) — raster/GeoTIFF processing.
@@ -177,6 +178,26 @@ PCBoom is not bundled or redistributed. Access requires a separate NASA software
 
 ## 8. Data sources
 
+### Routes and distance
+
+The UI ships with a small catalog of conceptual future high-speed missions: DFW–JFK, DFW–LAX,
+LAX–JFK, LAX–HNL, DFW–SJU, JFK–LHR, and SFO–HND. Endpoints are real airport reference points
+retrieved from the public-domain [OurAirports data dump](https://ourairports.com/data/) on
+2026-08-03. The points are committed as a reviewed subset so opening the UI never depends on a
+network request or a changing upstream file.
+
+Each concept uses the shortest path on the WGS-84 ellipsoid, calculated with `pyproj.Geod`, and is
+split into roughly 200 km analysis segments. It is intentionally **not** described as a filed route,
+published airway, daily oceanic track, ATC clearance, or approved supersonic corridor. Current U.S.
+procedures can later be imported from the FAA's 28-day [CIFP product](https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/download/),
+but present-day subsonic procedures should not be passed off as future hypersonic routing.
+
+Coriolis is not an extra correction to geometric distance. Earth shape belongs in the WGS-84
+geodesic; Earth rotation and atmospheric dynamics belong in the forecast model and its wind field.
+Fuel and trip time therefore remain **NOT MODELED** until reviewed aircraft performance data can be
+integrated segment-by-segment with along-track HRRR or GEFS winds. Adding a percentage to distance
+would look precise while double-counting or inventing physics.
+
 ### Operational U.S. forecast
 
 **HRRR** is the initial nominal forecast source for the conterminous United States. The
@@ -198,18 +219,25 @@ Required upper-air variables include, at minimum:
 member and records it in the source request. The first planning implementation treats member
 outcomes as an empirical scenario distribution.
 
+GEFS is global, so it is the forecast baseline for Hawaii, Puerto Rico, and international or
+oceanic missions. HRRR remains a higher-resolution regional supplement where the route is inside
+its CONUS domain; the current adapter does not claim HRRR coverage for U.S. territories.
+
 A high fraction of passing ensemble members must not automatically be described as validated 95% regulatory reliability. Ensemble calibration, dependence, model error, representativeness, and conservative margin selection require separate justification.
 
 ### Historical development
 
 **ERA5** is used for repeatable historical cases and back-testing. The explicit CDS retrieval path
 requires the contributor's own accepted dataset terms and `~/.cdsapirc` credentials; downloaded
-GRIB files are cached and checksummed like NOAA inputs.
+GRIB files are cached and checksummed like NOAA inputs. ERA5 has global coverage, but it is
+reanalysis rather than a live forecast.
 
 ### Terrain
 
-Use **USGS 3DEP** for U.S. routes. `fetch-terrain` samples one declared route leg through official
+Use **USGS 3DEP** on covered U.S. land, including available U.S.-territory products. `fetch-terrain`
+samples one declared route leg through official
 USGS cross-section and elevation-point services and serializes the normalized terrain profile.
+It is not a global ocean-floor or international terrain source.
 
 - product and resolution;
 - horizontal datum;
@@ -428,9 +456,9 @@ planner:
   altitude_ft: [40000, 42000, 44000, 46000, 48000, 50000]
 ```
 
-The example route runs from Seattle to New York through nine U.S. waypoints. The default
-configuration remains synthetic and network-free so contributors can run the full repository
-immediately.
+The UI defaults to the DFW–JFK concept and lets the user switch among the reviewed mission catalog.
+The baseline configuration's CSV remains available for explicit custom waypoint experiments. Both
+paths remain synthetic and network-free so contributors can run the full repository immediately.
 
 ## 13. CLI
 

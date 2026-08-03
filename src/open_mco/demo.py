@@ -21,7 +21,7 @@ from open_mco.models import (
 )
 from open_mco.optimization import GridSearchPlanner
 from open_mco.physics import MockMCOEngine
-from open_mco.route import route_from_waypoints
+from open_mco.route import get_mission, interpolate_position, route_from_waypoints
 from open_mco.terrain import FlatTerrainProvider
 
 DEMO_VALID_TIME = datetime(2026, 8, 3, 12, tzinfo=UTC)
@@ -74,20 +74,25 @@ def synthetic_aircraft() -> AircraftModel:
 
 
 def demo_route(
-    csv_path: str | Path = "data/examples/route.csv", *, spacing_m: float = 100_000
+    csv_path: str | Path | None = None,
+    *,
+    mission_id: str = "dfw_jfk",
+    spacing_m: float = 200_000,
 ) -> Route:
+    """Build a curated airport-to-airport mission or an explicitly supplied waypoint file."""
+
+    if csv_path is None:
+        return get_mission(mission_id).build_route(spacing_m=spacing_m)
     frame = pd.read_csv(csv_path)
     waypoints = list(zip(frame["latitude"], frame["longitude"], strict=True))
-    return route_from_waypoints(
-        waypoints, spacing_m=spacing_m, name="Transcontinental U.S. research route"
-    )
+    return route_from_waypoints(waypoints, spacing_m=spacing_m, name="Imported research route")
 
 
-def build_demo_scenario() -> DemoScenario:
+def build_demo_scenario(mission_id: str = "dfw_jfk") -> DemoScenario:
     """Build the deterministic scenario once for any presentation or export surface."""
 
     aircraft = synthetic_aircraft()
-    route = demo_route()
+    route = demo_route(mission_id=mission_id)
     weather = SyntheticAtmosphereProvider()
     terrain_provider = FlatTerrainProvider()
     planner = GridSearchPlanner(
@@ -103,19 +108,20 @@ def build_demo_scenario() -> DemoScenario:
         reliability_level=0.95,
         valid_time=DEMO_VALID_TIME,
     )
+    midpoint_latitude, midpoint_longitude = interpolate_position(route, 0.5)
     return DemoScenario(
         aircraft=aircraft,
         route=route,
         result=result,
-        atmosphere=weather.profile(37.0, -96.0, DEMO_VALID_TIME),
+        atmosphere=weather.profile(midpoint_latitude, midpoint_longitude, DEMO_VALID_TIME),
         terrain=terrain_provider.profile(route.segments[0]),
     )
 
 
-def run_demo(*, results_root: str | Path = "results") -> Path:
+def run_demo(*, results_root: str | Path = "results", mission_id: str = "dfw_jfk") -> Path:
     """Run the complete synthetic path and return its evidence-package directory."""
 
-    scenario = build_demo_scenario()
+    scenario = build_demo_scenario(mission_id)
     return write_evidence_package(
         aircraft=scenario.aircraft,
         route=scenario.route,

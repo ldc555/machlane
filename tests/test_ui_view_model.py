@@ -24,3 +24,17 @@ def test_active_segment_bounds_progress() -> None:
     assert active_segment_index(scenario.route, 0) == 0
     assert active_segment_index(scenario.route, 1) == last_index
     assert active_segment_index(scenario.route, 2) == last_index
+
+
+def test_pacific_route_display_does_not_span_the_long_way_around() -> None:
+    scenario = build_demo_scenario("sfo_hnd")
+    rows = segment_rows(scenario.route, scenario.result)
+    corridors = corridor_rows(scenario.route, scenario.result)
+
+    assert all(abs(row["path"][1][0] - row["path"][0][0]) <= 180 for row in rows)
+    assert all(
+        max(point[0] for point in row["polygon"])
+        - min(point[0] for point in row["polygon"])
+        <= 180
+        for row in corridors
+    )

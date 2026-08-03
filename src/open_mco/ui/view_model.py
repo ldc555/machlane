@@ -10,6 +10,12 @@ from open_mco.route import corridor_geojson
 METERS_TO_FEET = 3.280839895
 
 
+def _unwrap_longitude(longitude: float, reference: float) -> float:
+    """Keep a displayed longitude within one half-world of a local reference."""
+
+    return reference + ((longitude - reference + 180) % 360) - 180
+
+
 def active_segment_index(route: Route, progress: float) -> int:
     """Resolve a bounded route-progress fraction to a stable segment index."""
 
@@ -39,7 +45,10 @@ def segment_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
                 "end_km": round(cumulative_m / 1000, 1),
                 "path": [
                     [segment.start_longitude, segment.start_latitude],
-                    [segment.end_longitude, segment.end_latitude],
+                    [
+                        _unwrap_longitude(segment.end_longitude, segment.start_longitude),
+                        segment.end_latitude,
+                    ],
                 ],
                 "bearing_deg": round(segment.bearing_deg, 1),
                 "mach": limit.selected_mach,
@@ -60,13 +69,20 @@ def corridor_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
     """Flatten corridor GeoJSON into the minimal records PyDeck needs."""
 
     features = corridor_geojson(route, result.segment_limits)["features"]
-    return [
-        {
-            "segment": feature["properties"]["segment_id"],
-            "polygon": feature["geometry"]["coordinates"][0],
-            "color": [20, 184, 166, 55]
-            if feature["properties"]["status"] == "PASS"
-            else [239, 68, 68, 70],
-        }
-        for feature in features
-    ]
+    rows: list[dict[str, Any]] = []
+    for feature in features:
+        polygon = feature["geometry"]["coordinates"][0]
+        reference = polygon[0][0]
+        rows.append(
+            {
+                "segment": feature["properties"]["segment_id"],
+                "polygon": [
+                    [_unwrap_longitude(longitude, reference), latitude]
+                    for longitude, latitude in polygon
+                ],
+                "color": [20, 184, 166, 55]
+                if feature["properties"]["status"] == "PASS"
+                else [239, 68, 68, 70],
+            }
+        )
+    return rows

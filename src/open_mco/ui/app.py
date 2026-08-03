@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 import plotly.graph_objects as go
 import pydeck as pdk
@@ -9,7 +11,14 @@ import streamlit as st
 
 from open_mco.compliance import compliance_matrix
 from open_mco.demo import build_demo_scenario, run_demo
-from open_mco.route import interpolate_position
+from open_mco.route import (
+    AIRPORT_SOURCE_RETRIEVED,
+    AIRPORT_SOURCE_URL,
+    get_mission,
+    interpolate_position,
+    list_missions,
+    route_distance_m,
+)
 from open_mco.ui.view_model import active_segment_index, corridor_rows, segment_rows
 
 st.set_page_config(
@@ -62,14 +71,10 @@ h1,h2,h3 { letter-spacing:-.02em; }
 
 
 @st.cache_resource(show_spinner=False)
-def scenario():
+def scenario(mission_id: str):
     """Avoid recomputing the planner when an interaction only moves the aircraft."""
 
-    return build_demo_scenario()
-
-
-demo = scenario()
-rows = segment_rows(demo.route, demo.result)
+    return build_demo_scenario(mission_id)
 
 st.markdown(
     """
@@ -79,6 +84,24 @@ st.markdown(
 <div class="workflow"><span><b>01</b>Aircraft</span><span><b>02</b>Atmosphere</span><span><b>03</b>Route</span><span><b>04</b>Plan</span><span><b>05</b>Validate</span><span><b>06</b>Evidence</span></div>
 """,
     unsafe_allow_html=True,
+)
+
+missions = list_missions()
+mission_id = st.selectbox(
+    "Future high-speed mission",
+    options=[mission.mission_id for mission in missions],
+    format_func=lambda value: get_mission(value).label,
+    help="Real airport reference points connected by the shortest WGS-84 geodesic. These are concept missions, not filed or cleared routes.",
+)
+mission = get_mission(mission_id)
+demo = scenario(mission_id)
+rows = segment_rows(demo.route, demo.result)
+distance_km = route_distance_m(demo.route) / 1000
+map_latitude, map_longitude = interpolate_position(demo.route, 0.5)
+map_zoom = max(1.2, min(4.0, 4.9 - math.log2(max(distance_km, 500) / 500)))
+
+st.caption(
+    f"{mission.rationale} Real endpoints from OurAirports; path is conceptual, not an ATC clearance."
 )
 
 workspace, inspector = st.columns([3.15, 1], gap="medium")
@@ -102,7 +125,7 @@ with workspace:
             unsafe_allow_html=True,
         )
     st.markdown(
-        f'<div class="mission-strip"><span>Route <b>SEA → JFK · CONUS</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
+        f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_km:,.0f} km</b></span><span>Geometry <b>WGS-84 geodesic</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
         unsafe_allow_html=True,
     )
 
@@ -135,6 +158,24 @@ with workspace:
             stroked=True,
         ),
         pdk.Layer(
+            "TextLayer",
+            [
+                {
+                    "position": [mission.origin.longitude, mission.origin.latitude],
+                    "label": mission.origin.iata,
+                },
+                {
+                    "position": [mission.destination.longitude, mission.destination.latitude],
+                    "label": mission.destination.iata,
+                },
+            ],
+            get_position="position",
+            get_text="label",
+            get_size=15,
+            get_pixel_offset=[0, -18],
+            get_color=[226, 236, 246, 230],
+        ),
+        pdk.Layer(
             "ScatterplotLayer",
             [{"position": [aircraft_lon, aircraft_lat]}],
             get_position="position",
@@ -159,7 +200,11 @@ with workspace:
             layers=map_layers,
             map_style=pdk.map_styles.CARTO_DARK,
             initial_view_state=pdk.ViewState(
-                latitude=39.2, longitude=-98.0, zoom=3.15, pitch=12, bearing=0
+                latitude=map_latitude,
+                longitude=map_longitude,
+                zoom=map_zoom,
+                pitch=8,
+                bearing=0,
             ),
             tooltip={
                 "html": "<b>{segment}</b><br/>Mach {mach}<br/>{altitude_ft} ft<br/>{decision}",
@@ -181,6 +226,10 @@ with inspector:
         unsafe_allow_html=True,
     )
     st.markdown(
+        f'<div class="status-card"><div class="label">Route geometry</div><div class="value">{distance_km:,.0f} km</div><div class="meta">{distance_km / 1.852:,.0f} nmi · WGS-84 ellipsoid</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
         f'<div class="status-card"><div class="label">Recommendation</div><div class="value">Mach {active["mach"]:.2f}</div><div class="meta">{active["altitude_ft"]:,} ft · scenario target unvalidated</div></div>',
         unsafe_allow_html=True,
     )
@@ -190,6 +239,10 @@ with inspector:
     )
     st.markdown(
         '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT MODELED</span></div><div class="meta">No 0.11 psf determination</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="status-card"><div class="label">Fuel / trip time</div><div class="value"><span class="pending">NOT MODELED</span></div><div class="meta">Requires validated performance data and segment winds</div></div>',
         unsafe_allow_html=True,
     )
     st.markdown(
@@ -207,7 +260,7 @@ with plan_tab:
     st.dataframe(
         table,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         column_order=["segment", "start_km", "end_km", "altitude_ft", "mach", "decision", "boom"],
         column_config={
             "segment": "Segment",
@@ -243,7 +296,7 @@ with engineering_tab:
             paper_bgcolor="#0a111b",
             plot_bgcolor="#0d1722",
         )
-        st.plotly_chart(route_figure, use_container_width=True)
+        st.plotly_chart(route_figure, width="stretch")
     with chart_right:
         atmosphere_figure = go.Figure(
             go.Scatter(
@@ -264,7 +317,7 @@ with engineering_tab:
             paper_bgcolor="#0a111b",
             plot_bgcolor="#0d1722",
         )
-        st.plotly_chart(atmosphere_figure, use_container_width=True)
+        st.plotly_chart(atmosphere_figure, width="stretch")
     st.info(
         "Effective sound speed, ray paths, boom footprint, and absolute overpressure remain unavailable until cited and validated physics is implemented."
     )
@@ -274,22 +327,30 @@ with evidence_tab:
     st.dataframe(
         pd.DataFrame(
             [
-                {"Source": "NOAA HRRR", "State": "FETCH READY", "Use": "Explicit point profile"},
-                {"Source": "NOAA GEFS", "State": "FETCH READY", "Use": "Explicit member profile"},
+                {
+                    "Source": "NOAA HRRR",
+                    "State": mission.hrrr_coverage,
+                    "Use": "Regional nominal forecast",
+                },
+                {
+                    "Source": "NOAA GEFS",
+                    "State": "GLOBAL · FETCH READY",
+                    "Use": "Forecast ensemble",
+                },
                 {
                     "Source": "USGS 3DEP",
-                    "State": "FETCH READY",
-                    "Use": "Explicit route-leg profile",
+                    "State": "U.S. LAND ONLY",
+                    "Use": "Terrain where covered",
                 },
                 {
                     "Source": "ERA5",
-                    "State": "FETCH READY",
-                    "Use": "Historical · CDS credentials",
+                    "State": "GLOBAL · CREDENTIAL GATED",
+                    "Use": "Historical back-testing",
                 },
             ]
         ),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     st.caption(
         "Fetch-ready means the adapter can retrieve and normalize data. It does not mean the "
@@ -303,7 +364,7 @@ with evidence_tab:
         ]
     )
     with evidence_left:
-        st.dataframe(statuses, hide_index=True, use_container_width=True)
+        st.dataframe(statuses, hide_index=True, width="stretch")
     with evidence_right:
         st.markdown("#### Traceability")
         st.caption(f"Engine · {demo.result.engine_name} {demo.result.engine_version}")
@@ -314,11 +375,19 @@ with evidence_tab:
             st.json(
                 {
                     "aircraft": demo.aircraft.name.original_value,
+                    "route": {
+                        "mission_id": mission.mission_id,
+                        "geometry": "WGS-84 ellipsoidal geodesic",
+                        "distance_m": route_distance_m(demo.route),
+                        "airport_source": AIRPORT_SOURCE_URL,
+                        "airport_source_retrieved": AIRPORT_SOURCE_RETRIEVED,
+                        "operational_status": "CONCEPTUAL_NOT_FILED_OR_CLEARED",
+                    },
                     "atmosphere": demo.atmosphere.source.model_dump(mode="json"),
                     "terrain": demo.terrain.source.model_dump(mode="json"),
                     "run_label": demo.result.label,
                 }
             )
-        if st.button("Create evidence package", use_container_width=True):
-            output = run_demo()
+        if st.button("Create evidence package", width="stretch"):
+            output = run_demo(mission_id=mission_id)
             st.success(f"Evidence package created: {output}")
