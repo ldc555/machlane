@@ -82,10 +82,14 @@ h1,h2,h3 { letter-spacing:-.02em; }
 )
 
 
-@st.cache_resource(show_spinner=False)
-def scenario(mission_id: str):
-    """Avoid recomputing the planner when an interaction only moves the aircraft."""
+SCENARIO_CACHE_SCHEMA = "weather-regimes-v1"
 
+
+@st.cache_resource(show_spinner=False)
+def scenario(mission_id: str, cache_schema: str):
+    """Cache by mission and result schema so old objects cannot survive model changes."""
+
+    del cache_schema
     return build_demo_scenario(mission_id)
 
 st.markdown(
@@ -106,7 +110,7 @@ mission_id = st.selectbox(
     help="Real airport reference points connected by the shortest WGS-84 geodesic. These are concept missions, not filed or cleared routes.",
 )
 mission = get_mission(mission_id)
-demo = scenario(mission_id)
+demo = scenario(mission_id, SCENARIO_CACHE_SCHEMA)
 rows = segment_rows(demo.route, demo.result)
 regime_by_id = {regime.segment_id: regime for regime in demo.weather_regimes}
 segment_palette = (
