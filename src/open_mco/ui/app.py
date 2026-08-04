@@ -39,19 +39,6 @@ from open_mco.ui.view_model import (
     segment_rows,
 )
 
-PLANE_ICON_MAPPING = {
-    "plane": {
-        "x": 0,
-        "y": 0,
-        "width": 256,
-        "height": 256,
-        "anchorX": 128,
-        "anchorY": 128,
-        "mask": False,
-    }
-}
-PLANE_ICON_ATLAS = str(Path(__file__).with_name("static") / "plane.png")
-PLANE_ARTWORK_HEADING_OFFSET_DEG = 45
 OPENSKY_LOOKBACK_DAYS = 7
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OPENSKY_CACHE = OpenSkyRouteCache(PROJECT_ROOT / "data/cache/opensky_routes")
@@ -370,37 +357,17 @@ atmosphere_map_layers = [
     pdk.Layer(
         "PathLayer",
         rows,
-        id="one-mile-atmosphere-band",
-        get_path="path",
-        get_color="color",
-        get_width=3_218.688,
-        width_units="meters",
-        pickable=True,
-    ),
-    pdk.Layer(
-        "PathLayer",
-        rows,
         id="weather-regime-centerlines",
         get_path="path",
         get_color="color",
-        width_min_pixels=3,
+        get_width=5,
+        width_units="pixels",
+        width_min_pixels=4,
+        width_max_pixels=6,
         pickable=True,
     ),
 ]
 observed_track_layers = [
-    pdk.Layer(
-        "ScatterplotLayer",
-        [
-            {"position": [display_longitude(lon, map_longitude), lat]}
-            for lat, lon in observed_route.waypoints
-        ],
-        get_position="position",
-        get_radius=2200,
-        get_fill_color=[255, 213, 0, 220],
-        get_line_color=[6, 12, 20, 255],
-        line_width_min_pixels=2,
-        stroked=True,
-    ),
     pdk.Layer(
         "PathLayer",
         [
@@ -519,46 +486,23 @@ def render_workspace() -> None:
             )
         with toggle_note:
             st.caption(
-                "Weather band extends exactly 1 statute mile on each side of the observed track."
+                "Colored regimes share the exact OpenSky centerline; no filled corridor is drawn."
             )
 
         aircraft_layers = [
             pdk.Layer(
                 "ScatterplotLayer",
                 [{"position": [aircraft["display_longitude"], aircraft["latitude"]]}],
-                id="aircraft-halo",
+                id="aircraft-position-dot",
                 get_position="position",
-                get_radius=18,
+                get_radius=9,
                 radius_units="pixels",
-                radius_min_pixels=18,
-                radius_max_pixels=18,
-                get_fill_color=[10, 17, 27, 48],
-                get_line_color=[255, 213, 0, 255],
-                line_width_min_pixels=3,
+                radius_min_pixels=9,
+                radius_max_pixels=9,
+                get_fill_color=[255, 213, 0, 255],
+                get_line_color=[7, 12, 19, 255],
+                line_width_min_pixels=2,
                 stroked=True,
-            ),
-            pdk.Layer(
-                "IconLayer",
-                [
-                    {
-                        "position": [
-                            aircraft["display_longitude"],
-                            aircraft["latitude"],
-                        ],
-                        "icon": "plane",
-                    }
-                ],
-                id="aircraft-plane",
-                get_position="position",
-                icon_atlas=PLANE_ICON_ATLAS,
-                icon_mapping=PLANE_ICON_MAPPING,
-                get_icon="icon",
-                get_size=56,
-                get_color=[255, 255, 255, 255],
-                size_scale=1,
-                size_min_pixels=56,
-                size_max_pixels=56,
-                get_angle=aircraft["bearing_deg"] - PLANE_ARTWORK_HEADING_OFFSET_DEG,
             ),
         ]
         visible_map_layers: list[pdk.Layer] = []
@@ -831,7 +775,7 @@ with evidence_tab:
                 {"Field": "Payload checksum", "Value": route_checksum},
                 {
                     "Field": "Geometry policy",
-                    "Value": "Full observed polyline retained; 1-mile atmospheric band",
+                    "Value": "Full observed polyline retained; regimes drawn on centerline",
                 },
             ]
         ),

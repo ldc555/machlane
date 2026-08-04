@@ -241,11 +241,11 @@ and oceanic coverage without changing the route or planner contracts. Each regim
 OpenSky polyline and along-track distance; it is never replaced by a direct chord between weather
 boundaries.
 
-The map's blue-to-red corridor shows **ambient pressure at the planner altitude**. It does not show a
-sonic-boom footprint. Its band is centered on the retained OpenSky polyline and extends one statute
-mile to either side. Independent map toggles show or hide the yellow observed track and atmospheric
-segments. Surface boom colors must wait for a propagation engine that produces receiver waveforms
-and ground overpressure.
+The map's blue-to-red centerline shows **ambient pressure at the planner altitude**. It does not show
+a sonic-boom footprint. Atmospheric regimes use a thin colored line on the retained OpenSky
+polyline; no filled corridor is drawn. Independent map toggles show or hide the yellow observed
+track and atmospheric segments. Surface boom colors must wait for a propagation engine that
+produces receiver waveforms and ground overpressure.
 
 ### Atmosphere
 
