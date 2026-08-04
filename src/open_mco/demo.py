@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from open_mco.atmosphere import SyntheticAtmosphereProvider
+from open_mco.atmosphere import AtmosphereProvider, SyntheticAtmosphereProvider
 from open_mco.compliance import write_evidence_package
 from open_mco.models import (
     AircraftModel,
@@ -108,16 +108,18 @@ def demo_route(
 
 
 def build_demo_scenario(
-    mission_id: str = "dfw_jfk", *, route_override: Route | None = None
+    mission_id: str = "dfw_jfk",
+    *,
+    route_override: Route | None = None,
+    atmosphere_provider: AtmosphereProvider | None = None,
+    valid_time: datetime = DEMO_VALID_TIME,
 ) -> DemoScenario:
-    """Build the deterministic scenario on a conceptual or explicitly imported route."""
+    """Build a scenario through an injectable atmosphere-provider boundary."""
 
     aircraft = synthetic_aircraft()
-    weather = SyntheticAtmosphereProvider()
+    weather = atmosphere_provider or SyntheticAtmosphereProvider()
     if route_override is None:
-        sampled_route = get_mission(mission_id).build_route(
-            spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M
-        )
+        sampled_route = get_mission(mission_id).build_route(spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M)
     else:
         sampled_route = route_from_waypoints(
             route_override.waypoints,
@@ -129,7 +131,7 @@ def build_demo_scenario(
     route, weather_regimes = segment_route_by_weather(
         sampled_route,
         weather,
-        DEMO_VALID_TIME,
+        valid_time,
         settings=DEMO_WEATHER_SETTINGS,
     )
     terrain_provider = FlatTerrainProvider()
@@ -144,28 +146,33 @@ def build_demo_scenario(
         mach_values=list(DEMO_MACH_VALUES),
         altitude_m=list(DEMO_ALTITUDES_M),
         reliability_level=0.95,
-        valid_time=DEMO_VALID_TIME,
+        valid_time=valid_time,
     )
     midpoint_latitude, midpoint_longitude = interpolate_position(route, 0.5)
     segment_atmospheres = tuple(
-        weather.profile(*interpolate_segment_position(segment), DEMO_VALID_TIME)
+        weather.profile(*interpolate_segment_position(segment), valid_time)
         for segment in route.segments
     )
     return DemoScenario(
         aircraft=aircraft,
         route=route,
         result=result,
-        atmosphere=weather.profile(midpoint_latitude, midpoint_longitude, DEMO_VALID_TIME),
+        atmosphere=weather.profile(midpoint_latitude, midpoint_longitude, valid_time),
         terrain=terrain_provider.profile(route.segments[0]),
         weather_regimes=weather_regimes,
         segment_atmospheres=segment_atmospheres,
     )
 
 
-def run_demo(*, results_root: str | Path = "results", mission_id: str = "dfw_jfk") -> Path:
+def run_demo(
+    *,
+    results_root: str | Path = "results",
+    mission_id: str = "dfw_jfk",
+    route_override: Route | None = None,
+) -> Path:
     """Run the complete synthetic path and return its evidence-package directory."""
 
-    scenario = build_demo_scenario(mission_id)
+    scenario = build_demo_scenario(mission_id, route_override=route_override)
     return write_evidence_package(
         aircraft=scenario.aircraft,
         route=scenario.route,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +12,14 @@ import requests
 
 from open_mco.atmosphere import ERA5Provider, HerbieGEFSProvider, HerbieHRRRProvider
 from open_mco.demo import demo_route
-from open_mco.route import OpenSkyTrackProvider, get_mission, route_from_waypoints
+from open_mco.models import RouteSourceMetadata
+from open_mco.route import (
+    OpenSkyRouteCache,
+    OpenSkyRouteNotFoundError,
+    OpenSkyTrackProvider,
+    get_mission,
+    route_from_waypoints,
+)
 from open_mco.terrain import RasterTerrainProvider, USGS3DEPProvider
 from open_mco.validation import PCBoomAdapter
 
@@ -104,10 +111,10 @@ def test_opensky_adapter_imports_latest_matching_observed_track(monkeypatch) -> 
                     "callsign": "TEST42 ",
                     "startTime": 1_754_265_600,
                     "endTime": 1_754_294_400,
-                        "path": [
-                            [1_754_265_600, 32.90, -97.04, 0, 0, True],
-                            [1_754_265_700, 32.90, -97.04, 100, 0, False],
-                            [1_754_266_000, 33.10, -96.70, 5_000, 65, False],
+                    "path": [
+                        [1_754_265_600, 32.90, -97.04, 0, 0, True],
+                        [1_754_265_700, 32.90, -97.04, 100, 0, False],
+                        [1_754_266_000, 33.10, -96.70, 5_000, 65, False],
                         [1_754_270_000, 36.50, -88.00, 11_000, 70, False],
                         [1_754_294_000, 40.60, -73.80, 2_000, 75, False],
                     ],
@@ -147,6 +154,81 @@ def test_opensky_adapter_imports_latest_matching_observed_track(monkeypatch) -> 
     assert route.observations[2].barometric_altitude_m == 5_000
     assert route.observations[-1].true_track_deg == 75
     assert len(session.get_calls) == 2
+
+
+def test_opensky_recent_lookup_searches_newest_day_first(monkeypatch) -> None:
+    provider = OpenSkyTrackProvider()
+    mission = get_mission("dfw_jfk")
+    expected = mission.build_route()
+    begins: list[date] = []
+
+    def fake_route(self, origin, destination, *, begin, end, spacing_m=185_200):
+        del self, origin, destination, end, spacing_m
+        begins.append(begin.date())
+        if len(begins) < 3:
+            raise OpenSkyRouteNotFoundError("no matching flight")
+        return expected
+
+    monkeypatch.setattr(OpenSkyTrackProvider, "route_for_airports", fake_route)
+    route = provider.recent_route_for_airports(
+        mission.origin,
+        mission.destination,
+        on_or_before=datetime(2026, 8, 3, 23, 59, tzinfo=UTC),
+        lookback_days=7,
+    )
+
+    assert route is expected
+    assert begins == [date(2026, 8, 3), date(2026, 8, 2), date(2026, 8, 1)]
+
+
+def test_opensky_cache_accepts_only_matching_observed_routes(tmp_path: Path) -> None:
+    mission = get_mission("dfw_jfk")
+    search_date = date(2026, 8, 3)
+    route = route_from_waypoints(
+        [(32.9, -97.04), (40.6, -73.8)],
+        spacing_m=185_200,
+        name="OpenSky observed DFW to JFK",
+        source=RouteSourceMetadata(
+            provider="opensky",
+            data_kind="observed_track",
+            retrieved_at=datetime(2026, 8, 4, tzinfo=UTC),
+            label="OBSERVED_OPENSKY_TRACK_EXPERIMENTAL_NOT_A_FILED_ROUTE",
+            origin_icao=mission.origin.icao,
+            destination_icao=mission.destination.icao,
+            point_count=2,
+        ),
+    )
+    cache = OpenSkyRouteCache(tmp_path)
+
+    path = cache.save(mission.mission_id, search_date, route)
+    loaded = cache.load(
+        mission.mission_id,
+        search_date,
+        origin_icao=mission.origin.icao,
+        destination_icao=mission.destination.icao,
+    )
+
+    assert loaded == route
+    assert path.exists()
+    assert (
+        cache.load(
+            mission.mission_id,
+            search_date,
+            origin_icao=mission.origin.icao,
+            destination_icao="KLAX",
+        )
+        is None
+    )
+    path.write_text("not json", encoding="utf-8")
+    assert (
+        cache.load(
+            mission.mission_id,
+            search_date,
+            origin_icao=mission.origin.icao,
+            destination_icao=mission.destination.icao,
+        )
+        is None
+    )
 
 
 def test_hrrr_adapter_extracts_and_labels_real_pressure_profile(

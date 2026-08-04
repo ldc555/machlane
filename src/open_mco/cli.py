@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -49,7 +49,9 @@ def boom_readiness(
     """Explain every blocker before a physical sonic-boom prediction can run."""
 
     report = assess_boom_readiness(path, near_field_path=near_field)
-    typer.echo(f"Physical prediction ready: {'YES' if report.ready_for_physical_prediction else 'NO'}")
+    typer.echo(
+        f"Physical prediction ready: {'YES' if report.ready_for_physical_prediction else 'NO'}"
+    )
     for check in report.checks:
         typer.echo(f"{check.status.value:15} {check.key}: {check.detail}")
         if check.action:
@@ -168,6 +170,12 @@ def fetch_route(
         formats=["%Y-%m-%d"],
         help="UTC departure date within OpenSky's recent-track window.",
     ),
+    lookback_days: int = typer.Option(
+        7,
+        min=1,
+        max=30,
+        help="Search newest to oldest across this many days.",
+    ),
     output: Path = typer.Option(Path("data/processed/opensky_route.json")),
 ) -> None:
     """Fetch one recent observed OpenSky trajectory using OAuth credentials from the environment."""
@@ -176,15 +184,13 @@ def fetch_route(
         mission = get_mission(mission_id)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--mission-id") from exc
-    begin = observed_date.replace(tzinfo=UTC)
-    end = begin + timedelta(days=1) - timedelta(seconds=1)
     provider = OpenSkyTrackProvider(network_enabled=True)
     try:
-        route = provider.route_for_airports(
+        route = provider.recent_route_for_airports(
             mission.origin,
             mission.destination,
-            begin=begin,
-            end=end,
+            on_or_before=observed_date.replace(tzinfo=UTC),
+            lookback_days=lookback_days,
         )
     except (RuntimeError, ValueError, OSError) as exc:
         typer.echo(f"OpenSky route fetch failed: {exc}", err=True)

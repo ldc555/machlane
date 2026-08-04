@@ -28,7 +28,7 @@ class Airport:
 
 @dataclass(frozen=True)
 class MissionDefinition:
-    """A conceptual mission, not a filed, cleared, or approved flight route."""
+    """An airport pair eligible for an observed OpenSky route lookup."""
 
     mission_id: str
     origin: Airport
@@ -89,15 +89,25 @@ class MissionDefinition:
 _AIRPORTS = {
     airport.iata: airport
     for airport in (
-        Airport("KDFW", "DFW", "Dallas Fort Worth International Airport", 32.896801, -97.038002, "US-TX"),
-        Airport("KDEN", "DEN", "Denver International Airport", 39.860027, -104.673792, "US-CO"),
-        Airport("KBOS", "BOS", "Boston Logan International Airport", 42.361970, -71.007900, "US-MA"),
-        Airport("KJFK", "JFK", "John F. Kennedy International Airport", 40.639447, -73.779317, "US-NY"),
-        Airport("KLAX", "LAX", "Los Angeles International Airport", 33.942501, -118.407997, "US-CA"),
-        Airport("PHNL", "HNL", "Daniel K. Inouye International Airport", 21.318387, -157.925670, "US-HI"),
-        Airport("TJSJ", "SJU", "Luis Munoz Marin International Airport", 18.439400, -66.001801, "PR-U-A"),
+        Airport(
+            "KDFW", "DFW", "Dallas Fort Worth International Airport", 32.896801, -97.038002, "US-TX"
+        ),
+        Airport(
+            "KBOS", "BOS", "Boston Logan International Airport", 42.361970, -71.007900, "US-MA"
+        ),
+        Airport(
+            "KJFK", "JFK", "John F. Kennedy International Airport", 40.639447, -73.779317, "US-NY"
+        ),
+        Airport(
+            "KLAX", "LAX", "Los Angeles International Airport", 33.942501, -118.407997, "US-CA"
+        ),
+        Airport(
+            "PHNL", "HNL", "Daniel K. Inouye International Airport", 21.318387, -157.925670, "US-HI"
+        ),
+        Airport(
+            "TJSJ", "SJU", "Luis Munoz Marin International Airport", 18.439400, -66.001801, "PR-U-A"
+        ),
         Airport("EGLL", "LHR", "London Heathrow Airport", 51.470748, -0.459909, "GB-ENG"),
-        Airport("RJAA", "NRT", "Narita International Airport", 35.768580, 140.388714, "JP-12"),
     )
 }
 
@@ -159,7 +169,15 @@ _MISSIONS = (
         "SJU",
         "U.S. territory",
         "us_oceanic",
-        "Mixed overland-oceanic concept connecting Dallas and Puerto Rico.",
+        "Mixed overland-oceanic U.S. territory test case connecting Dallas and Puerto Rico.",
+    ),
+    _mission(
+        "jfk_sju",
+        "JFK",
+        "SJU",
+        "East Coast to U.S. territory",
+        "us_oceanic",
+        "Frequent long-haul test case between New York and Puerto Rico.",
     ),
     _mission(
         "jfk_lhr",
@@ -167,15 +185,7 @@ _MISSIONS = (
         "LHR",
         "North Atlantic",
         "global_oceanic",
-        "Classic transatlantic market; the track is conceptual and not a daily NAT clearance.",
-    ),
-    _mission(
-        "den_nrt",
-        "DEN",
-        "NRT",
-        "Denver to Narita",
-        "global_oceanic",
-        "North Pacific concept following the shortest geodesic through Alaska and the Aleutians.",
+        "Classic transatlantic long-haul test case; an observed track is not a future NAT clearance.",
     ),
 )
 

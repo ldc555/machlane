@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from open_mco.atmosphere import SyntheticAtmosphereProvider
 from open_mco.demo import build_demo_scenario
-from open_mco.route import interpolate_position
+from open_mco.route import interpolate_position, route_from_waypoints
 from open_mco.ui.view_model import (
     active_segment_index,
     aircraft_view,
@@ -69,6 +70,25 @@ def test_ui_state_is_consistent_and_honestly_labeled() -> None:
     assert all(row["synthetic_score"] is not None for row in rows)
 
 
+def test_demo_accepts_injected_atmosphere_provider() -> None:
+    class RecordingAtmosphereProvider:
+        name = "recording"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[float, float]] = []
+            self.delegate = SyntheticAtmosphereProvider()
+
+        def profile(self, latitude, longitude, valid_time):
+            self.calls.append((latitude, longitude))
+            return self.delegate.profile(latitude, longitude, valid_time)
+
+    provider = RecordingAtmosphereProvider()
+    scenario = build_demo_scenario("jfk_lhr", atmosphere_provider=provider)
+
+    assert provider.calls
+    assert len(scenario.weather_regimes) == len(scenario.route.segments)
+
+
 def test_active_segment_bounds_progress() -> None:
     scenario = build_demo_scenario()
     last_index = len(scenario.route.segments) - 1
@@ -108,7 +128,8 @@ def test_aircraft_view_endpoints_align_with_route() -> None:
 
 
 def test_aircraft_view_is_continuous_across_the_dateline() -> None:
-    scenario = build_demo_scenario("den_nrt")
+    observed_track = route_from_waypoints([(40, -170), (40, 170)], spacing_m=200_000)
+    scenario = build_demo_scenario(route_override=observed_track)
     route = scenario.route
     _, reference = interpolate_position(route, 0.5)
     samples = [aircraft_view(route, index / 240, reference) for index in range(241)]
@@ -120,7 +141,8 @@ def test_aircraft_view_is_continuous_across_the_dateline() -> None:
 
 
 def test_pacific_route_display_does_not_span_the_long_way_around() -> None:
-    scenario = build_demo_scenario("den_nrt")
+    observed_track = route_from_waypoints([(40, -170), (40, 170)], spacing_m=200_000)
+    scenario = build_demo_scenario(route_override=observed_track)
     rows = segment_rows(scenario.route, scenario.result)
     corridors = corridor_rows(scenario.route, scenario.result)
 
@@ -132,15 +154,13 @@ def test_pacific_route_display_does_not_span_the_long_way_around() -> None:
     route_longitudes = [point[0] for row in rows for point in row["path"]]
     assert max(route_longitudes) - min(route_longitudes) < 120
     assert all(
-        max(point[0] for point in row["polygon"])
-        - min(point[0] for point in row["polygon"])
-        <= 180
+        max(point[0] for point in row["polygon"]) - min(point[0] for point in row["polygon"]) <= 180
         for row in corridors
     )
 
 
 def test_weather_segments_are_variable_and_explain_their_boundaries() -> None:
-    scenario = build_demo_scenario("den_nrt")
+    scenario = build_demo_scenario("jfk_lhr")
     lengths_nmi = [round(segment.distance_m / 1852) for segment in scenario.route.segments]
 
     assert len(scenario.weather_regimes) == len(scenario.route.segments) >= 4
@@ -171,7 +191,7 @@ def test_mock_live_metrics_are_smooth_reproducible_and_route_specific() -> None:
     first = mock_live_metrics(baseline, "dfw_jfk", 0.42)
     repeated = mock_live_metrics(baseline, "dfw_jfk", 0.42)
     adjacent = mock_live_metrics(baseline, "dfw_jfk", 0.43)
-    other_route = mock_live_metrics(baseline, "den_nrt", 0.42)
+    other_route = mock_live_metrics(baseline, "jfk_lhr", 0.42)
 
     assert first == repeated
     assert first != adjacent

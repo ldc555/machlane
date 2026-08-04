@@ -53,9 +53,10 @@ def test_mission_catalog_uses_real_endpoints_and_wgs84_distance() -> None:
         "dfw_lax",
         "lax_jfk",
         "jfk_lhr",
-        "den_nrt",
+        "jfk_sju",
         "bos_hnl",
     }
+    assert "den_nrt" not in mission_ids
     assert "lax_hnl" not in mission_ids
 
     route = get_mission("dfw_jfk").build_route()
@@ -66,10 +67,9 @@ def test_mission_catalog_uses_real_endpoints_and_wgs84_distance() -> None:
     assert "NOT_A_FILED_OR_OBSERVED_ROUTE" in route.source.label
 
 
-def test_pacific_mission_takes_short_antimeridian_path() -> None:
-    route = get_mission("den_nrt").build_route()
-    assert route_distance_m(route) / 1000 == pytest.approx(9310, rel=0.03)
+def test_geometry_takes_short_antimeridian_path() -> None:
+    route = route_from_waypoints([(40, -170), (40, 170)], spacing_m=200_000)
+    assert route_distance_m(route) / 1000 == pytest.approx(1704, rel=0.03)
     assert any(
-        abs(segment.end_longitude - segment.start_longitude) > 180
-        for segment in route.segments
+        abs(segment.end_longitude - segment.start_longitude) > 180 for segment in route.segments
     )

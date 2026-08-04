@@ -20,6 +20,7 @@ from open_mco.models import Route
 from open_mco.route import (
     AIRPORT_SOURCE_RETRIEVED,
     AIRPORT_SOURCE_URL,
+    OpenSkyRouteCache,
     OpenSkyTrackProvider,
     get_mission,
     interpolate_position,
@@ -52,6 +53,9 @@ PLANE_ICON_MAPPING = {
 }
 PLANE_ICON_ATLAS = str(Path(__file__).with_name("static") / "plane.png")
 PLANE_ARTWORK_HEADING_OFFSET_DEG = 45
+OPENSKY_LOOKBACK_DAYS = 7
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+OPENSKY_CACHE = OpenSkyRouteCache(PROJECT_ROOT / "data/cache/opensky_routes")
 
 # Streamlit renamed ``experimental_fragment`` to ``fragment`` in 1.37. Prefer the stable name, fall
 # back to the experimental one, and degrade to a no-op decorator on older pins (the page simply
@@ -130,12 +134,13 @@ SCENARIO_CACHE_SCHEMA = "weather-regimes-v3-pressure-corridor"
 
 
 @st.cache_resource(show_spinner=False)
-def scenario(mission_id: str, cache_schema: str, route_json: str | None = None):
-    """Cache by mission and result schema so old objects cannot survive model changes."""
+def scenario(mission_id: str, cache_schema: str, route_json: str):
+    """Run only on normalized observed geometry and cache by result schema."""
 
     del cache_schema
-    route_override = None if route_json is None else Route.model_validate_json(route_json)
+    route_override = Route.model_validate_json(route_json)
     return build_demo_scenario(mission_id, route_override=route_override)
+
 
 st.markdown(
     """
@@ -171,7 +176,7 @@ mission_id = st.selectbox(
     "Future high-speed mission",
     options=[mission.mission_id for mission in missions],
     format_func=lambda value: get_mission(value).label,
-    help="Real airport reference points connected by the shortest WGS-84 geodesic. These are concept missions, not filed or cleared routes.",
+    help="Airport pairs searched in OpenSky. The planner does not run unless an observed track is loaded.",
 )
 mission = get_mission(mission_id)
 
@@ -182,13 +187,13 @@ with st.container(border=True):
     with source_control:
         st.markdown("**Observed route · OpenSky**")
         st.caption(
-            "Loads the latest matching departure once credentials are configured. "
-            "Falls back safely to the concept corridor."
+            f"Loads the most recent direct observed track in a {OPENSKY_LOOKBACK_DAYS}-day window. "
+            "No invented route fallback."
         )
     yesterday = datetime.now(UTC).date() - timedelta(days=1)
     with source_date:
         observed_date = st.date_input(
-            "Departure date (UTC)",
+            "Search ending (UTC)",
             value=yesterday,
             min_value=yesterday - timedelta(days=29),
             max_value=yesterday,
@@ -206,6 +211,14 @@ with st.container(border=True):
 
     opensky_key = f"opensky-route:{mission_id}:{observed_date.isoformat()}"
     opensky_attempt_key = f"opensky-attempt:{mission_id}:{observed_date.isoformat()}"
+    cached_route = OPENSKY_CACHE.load(
+        mission_id,
+        observed_date,
+        origin_icao=mission.origin.icao,
+        destination_icao=mission.destination.icao,
+    )
+    if opensky_key not in st.session_state and cached_route is not None:
+        st.session_state[opensky_key] = cached_route.model_dump_json()
     automatic_fetch = (
         credentials_configured
         and opensky_key not in st.session_state
@@ -213,17 +226,21 @@ with st.container(border=True):
     )
     if fetch_opensky or automatic_fetch:
         st.session_state[opensky_attempt_key] = True
-        begin = datetime.combine(observed_date, datetime.min.time(), tzinfo=UTC)
-        end = begin + timedelta(days=1) - timedelta(seconds=1)
+        search_end = datetime.combine(observed_date, datetime.max.time(), tzinfo=UTC)
         try:
-            with st.spinner("Finding a matching OpenSky flight and observed track…"):
-                fetched_route = OpenSkyTrackProvider(network_enabled=True).route_for_airports(
+            with st.spinner(
+                f"Searching the latest {OPENSKY_LOOKBACK_DAYS} days for an OpenSky track…"
+            ):
+                fetched_route = OpenSkyTrackProvider(
+                    network_enabled=True
+                ).recent_route_for_airports(
                     mission.origin,
                     mission.destination,
-                    begin=begin,
-                    end=end,
+                    on_or_before=search_end,
+                    lookback_days=OPENSKY_LOOKBACK_DAYS,
                 )
             st.session_state[opensky_key] = fetched_route.model_dump_json()
+            OPENSKY_CACHE.save(mission_id, observed_date, fetched_route)
         except (RuntimeError, ValueError, OSError) as exc:
             st.error(f"OpenSky import failed: {exc}")
 
@@ -234,19 +251,25 @@ with st.container(border=True):
             "OPENSKY_CLIENT_SECRET in Terminal, then restart Streamlit."
         )
     elif observed_route_json is None:
-        st.caption(
-            "No observed track was available. The conceptual corridor remains active."
+        st.error(
+            "No observed OpenSky route is loaded. Choose another airport pair/date or refresh; "
+            "MachLane will not invent a replacement route."
         )
     st.caption(
         "Experimental, downsampled observed path — not a filed route. "
         "[OpenSky terms](https://opensky-network.org/about/terms-of-use)"
     )
 
+if not isinstance(observed_route_json, str):
+    st.info(
+        "OpenSky-only workspace paused. Configure credentials and load an observed route to run "
+        "mock atmospheric segmentation."
+    )
+    st.stop()
+
 demo = scenario(mission_id, SCENARIO_CACHE_SCHEMA, observed_route_json)
-observed_route = (
-    None if observed_route_json is None else Route.model_validate_json(observed_route_json)
-)
-display_route = observed_route or demo.route
+observed_route = Route.model_validate_json(observed_route_json)
+display_route = observed_route
 rows = segment_rows(demo.route, demo.result)
 regime_by_id = {regime.segment_id: regime for regime in demo.weather_regimes}
 for row in rows:
@@ -281,38 +304,29 @@ distance_nmi = distance_km / 1.852
 map_latitude, map_longitude = interpolate_position(display_route, 0.5)
 map_zoom = max(1.2, min(4.0, 4.9 - math.log2(max(distance_km, 500) / 500)))
 
-if observed_route is None:
-    st.caption(
-        f"{mission.rationale} Real endpoints from OurAirports; path is conceptual, not an ATC clearance."
-    )
-else:
-    observed_source = observed_route.source
-    callsign = observed_source.callsign if observed_source and observed_source.callsign else "unknown"
-    observed_day = (
-        observed_source.observed_start.strftime("%Y-%m-%d")
-        if observed_source and observed_source.observed_start
-        else str(observed_date)
-    )
-    st.caption(
-        f"Observed OpenSky trajectory · {callsign} · {observed_day} · "
-        "experimental/downsampled, not a filed route or future supersonic approval."
-    )
+observed_source = observed_route.source
+callsign = observed_source.callsign if observed_source and observed_source.callsign else "unknown"
+observed_day = (
+    observed_source.observed_start.strftime("%Y-%m-%d")
+    if observed_source and observed_source.observed_start
+    else str(observed_date)
+)
+st.caption(
+    f"Observed OpenSky trajectory · {callsign} · {observed_day} · "
+    "experimental/downsampled, not a filed route or future supersonic approval."
+)
 
 summary_columns = st.columns(3)
 summary_columns[0].metric(
     "Route",
-    "OpenSky observed" if observed_route is not None else "Concept fallback",
-    (
-        f"{distance_nmi:,.0f} nmi · {len(display_route.waypoints)} observed points"
-        if observed_route is not None
-        else f"{distance_nmi:,.0f} nmi · waiting for OpenSky"
-    ),
+    "OpenSky observed",
+    f"{distance_nmi:,.0f} nmi · {len(display_route.waypoints)} observed points",
     delta_color="off",
 )
 summary_columns[1].metric(
     "Atmosphere",
     "MOCK feed" if mock_mode else "Synthetic",
-    f"{len(demo.route.segments)} regimes · 1 hPa pressure tolerance",
+    f"{len(demo.route.segments)} mock regimes · NOAA adapter boundary ready",
     delta_color="off",
 )
 summary_columns[2].metric(
@@ -393,25 +407,24 @@ static_map_layers = [
         get_color=[226, 236, 246, 230],
     ),
 ]
-if observed_route is not None:
-    static_map_layers.insert(
-        2,
-        pdk.Layer(
-            "PathLayer",
-            [
-                {
-                    "path": [
-                        [display_longitude(longitude, map_longitude), latitude]
-                        for latitude, longitude in observed_route.waypoints
-                    ]
-                }
-            ],
-            id="opensky-observed-track",
-            get_path="path",
-            get_color=[255, 213, 0, 235],
-            width_min_pixels=4,
-        ),
-    )
+static_map_layers.insert(
+    2,
+    pdk.Layer(
+        "PathLayer",
+        [
+            {
+                "path": [
+                    [display_longitude(longitude, map_longitude), latitude]
+                    for latitude, longitude in observed_route.waypoints
+                ]
+            }
+        ],
+        id="opensky-observed-track",
+        get_path="path",
+        get_color=[255, 213, 0, 235],
+        width_min_pixels=4,
+    ),
+)
 
 
 @fragment
@@ -456,16 +469,12 @@ def render_workspace() -> None:
         )
         live_weather_columns = st.columns(4)
         live_weather_columns[0].metric(
-            "Ambient pressure", f'{drag_weather["pressure_hpa"]:.0f} hPa'
+            "Ambient pressure", f"{drag_weather['pressure_hpa']:.0f} hPa"
         )
-        live_weather_columns[1].metric(
-            "Temperature", f'{drag_weather["temperature_c"]:.1f} °C'
-        )
-        live_weather_columns[2].metric(
-            "Wind speed", f'{drag_weather["wind_speed_kt"]:.0f} kt'
-        )
+        live_weather_columns[1].metric("Temperature", f"{drag_weather['temperature_c']:.1f} °C")
+        live_weather_columns[2].metric("Wind speed", f"{drag_weather['wind_speed_kt']:.0f} kt")
         live_weather_columns[3].metric(
-            "Along-track wind", f'{drag_weather["along_wind_kt"]:+.0f} kt'
+            "Along-track wind", f"{drag_weather['along_wind_kt']:+.0f} kt"
         )
 
         title_left, title_right = st.columns([3, 1])
@@ -478,7 +487,7 @@ def render_workspace() -> None:
                 unsafe_allow_html=True,
             )
         st.markdown(
-            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Geometry <b>{"OpenSky observed" if observed_route is not None else "Concept fallback"}</b></span><span>Pressure <b>{pressure_min_hpa:.1f}–{pressure_max_hpa:.1f} hPa at cruise</b></span><span>Boom <b>not modeled</b></span></div>',
+            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Geometry <b>OpenSky observed</b></span><span>Pressure <b>{pressure_min_hpa:.1f}–{pressure_max_hpa:.1f} hPa at cruise</b></span><span>Boom <b>not modeled</b></span></div>',
             unsafe_allow_html=True,
         )
 
@@ -543,8 +552,6 @@ def render_workspace() -> None:
         with legend_left:
             st.caption(
                 f"Blue {pressure_scale_min_hpa:.1f} hPa → red {pressure_scale_max_hpa:.1f} hPa · ambient pressure scale, not boom overpressure"
-                if observed_route is not None
-                else f"Blue {pressure_scale_min_hpa:.1f} hPa → red {pressure_scale_max_hpa:.1f} hPa · concept route until OpenSky loads"
             )
         with legend_right:
             st.caption(f"{drag_progress:.0%} complete · {drag_row['segment']}")
@@ -601,12 +608,8 @@ with plan_tab:
             "boundary_reason": "Boundary trigger",
             "start_nmi": st.column_config.NumberColumn("From nmi", format="%.1f"),
             "end_nmi": st.column_config.NumberColumn("To nmi", format="%.1f"),
-            "regime_pressure_hpa": st.column_config.NumberColumn(
-                "Pressure", format="%.1f hPa"
-            ),
-            "regime_temperature_c": st.column_config.NumberColumn(
-                "Temperature", format="%.1f °C"
-            ),
+            "regime_pressure_hpa": st.column_config.NumberColumn("Pressure", format="%.1f hPa"),
+            "regime_temperature_c": st.column_config.NumberColumn("Temperature", format="%.1f °C"),
             "regime_wind_kt": st.column_config.NumberColumn("Wind", format="%.1f kt"),
             "altitude_ft": st.column_config.NumberColumn("Altitude", format="%d ft"),
             "mach": st.column_config.NumberColumn("Mach", format="%.2f"),
@@ -657,7 +660,7 @@ with atmosphere_tab:
             )
         )
         pressure_figure.update_layout(
-            title=f'Pressure profile · {active["segment"]} · synthetic',
+            title=f"Pressure profile · {active['segment']} · synthetic",
             xaxis_title="Pressure (hPa)",
             yaxis_title="Altitude (ft)",
             template="plotly_dark",
@@ -680,7 +683,7 @@ with atmosphere_tab:
             )
         )
         wind_figure.update_layout(
-            title=f'Wind profile · {active["segment"]} · synthetic',
+            title=f"Wind profile · {active['segment']} · synthetic",
             xaxis_title="Wind speed (kt)",
             yaxis_title="Altitude (ft)",
             template="plotly_dark",
@@ -740,10 +743,10 @@ with model_tab:
         st.dataframe(
             pd.DataFrame(
                 [
-                    {"Variable": "Candidate Mach", "Value": f'{active["mach"]:.2f}'},
-                    {"Variable": "Altitude", "Value": f'{active["altitude_ft"]:,} ft'},
-                    {"Variable": "Along-track wind", "Value": f'{active["along_wind_kt"]:+.1f} kt'},
-                    {"Variable": "Synthetic limit", "Value": f'{active["synthetic_score"]:.3f}'},
+                    {"Variable": "Candidate Mach", "Value": f"{active['mach']:.2f}"},
+                    {"Variable": "Altitude", "Value": f"{active['altitude_ft']:,} ft"},
+                    {"Variable": "Along-track wind", "Value": f"{active['along_wind_kt']:+.1f} kt"},
+                    {"Variable": "Synthetic limit", "Value": f"{active['synthetic_score']:.3f}"},
                     {"Variable": "Surface overpressure", "Value": "NOT MODELED"},
                 ]
             ),
@@ -809,11 +812,11 @@ with evidence_tab:
                     "aircraft": demo.aircraft.name.original_value,
                     "route": {
                         "mission_id": mission.mission_id,
-                        "geometry": "WGS-84 ellipsoidal geodesic",
+                        "geometry": "OpenSky observed track resampled on WGS-84",
                         "distance_m": route_distance_m(demo.route),
                         "airport_source": AIRPORT_SOURCE_URL,
                         "airport_source_retrieved": AIRPORT_SOURCE_RETRIEVED,
-                        "operational_status": "CONCEPTUAL_NOT_FILED_OR_CLEARED",
+                        "operational_status": "OBSERVED_NOT_FILED_OR_CLEARED",
                     },
                     "atmosphere": demo.atmosphere.source.model_dump(mode="json"),
                     "terrain": demo.terrain.source.model_dump(mode="json"),
@@ -821,5 +824,5 @@ with evidence_tab:
                 }
             )
         if st.button("Create evidence package", width="stretch"):
-            output = run_demo(mission_id=mission_id)
+            output = run_demo(mission_id=mission_id, route_override=observed_route)
             st.success(f"Evidence package created: {output}")

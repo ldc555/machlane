@@ -1,5 +1,6 @@
 """Route construction, mission references, and corridor geometry."""
 
+from .cache import OpenSkyRouteCache
 from .geometry import (
     corridor_geojson,
     interpolate_position,
@@ -15,7 +16,7 @@ from .missions import (
     get_mission,
     list_missions,
 )
-from .opensky import OpenSkyTrackProvider
+from .opensky import OpenSkyRouteNotFoundError, OpenSkyTrackProvider
 from .weather import (
     WeatherRegimeSummary,
     WeatherSegmentationSettings,
@@ -27,7 +28,9 @@ __all__ = [
     "AIRPORT_SOURCE_URL",
     "Airport",
     "MissionDefinition",
+    "OpenSkyRouteCache",
     "OpenSkyTrackProvider",
+    "OpenSkyRouteNotFoundError",
     "WeatherRegimeSummary",
     "WeatherSegmentationSettings",
     "corridor_geojson",

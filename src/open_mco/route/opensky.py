@@ -17,6 +17,10 @@ from .geometry import route_from_waypoints
 from .missions import Airport
 
 
+class OpenSkyRouteNotFoundError(ValueError):
+    """No usable observed route matched the requested airport pair and time window."""
+
+
 class OpenSkyTrackProvider:
     """Import one observed OpenSky trajectory for an airport pair.
 
@@ -28,8 +32,7 @@ class OpenSkyTrackProvider:
     name = "opensky"
     api_base_url = "https://opensky-network.org/api"
     token_url = (
-        "https://auth.opensky-network.org/auth/realms/opensky-network/"
-        "protocol/openid-connect/token"
+        "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
     )
 
     def __init__(
@@ -78,7 +81,7 @@ class OpenSkyTrackProvider:
             },
         )
         if departures is None:
-            raise ValueError(
+            raise OpenSkyRouteNotFoundError(
                 f"OpenSky returned no departures from {origin.icao} in the requested interval"
             )
         flight = self._latest_matching_flight(departures, destination.icao)
@@ -91,7 +94,7 @@ class OpenSkyTrackProvider:
             params={"icao24": icao24, "time": track_time},
         )
         if not isinstance(track, dict):
-            raise ValueError(f"OpenSky returned no track for aircraft {icao24}")
+            raise OpenSkyRouteNotFoundError(f"OpenSky returned no track for aircraft {icao24}")
         observations = self._track_observations(track)
         waypoints: list[tuple[float, float]] = []
         for point in observations:
@@ -105,14 +108,9 @@ class OpenSkyTrackProvider:
         ).encode()
         checksum = hashlib.sha256(checksum_payload).hexdigest()
         callsign = str(
-            track.get("callsign")
-            or track.get("calllsign")
-            or flight.get("callsign")
-            or ""
+            track.get("callsign") or track.get("calllsign") or flight.get("callsign") or ""
         ).strip()
-        observed_start = datetime.fromtimestamp(
-            int(track.get("startTime", first_seen)), tz=UTC
-        )
+        observed_start = datetime.fromtimestamp(int(track.get("startTime", first_seen)), tz=UTC)
         observed_end = datetime.fromtimestamp(int(track.get("endTime", last_seen)), tz=UTC)
         flight_id = f"{icao24}:{first_seen}"
         source_url = f"{self.api_base_url}/tracks/all?icao24={icao24}&time={track_time}"
@@ -142,6 +140,43 @@ class OpenSkyTrackProvider:
                 ),
             ),
         )
+
+    def recent_route_for_airports(
+        self,
+        origin: Airport,
+        destination: Airport,
+        *,
+        on_or_before: datetime,
+        lookback_days: int = 7,
+        spacing_m: float = 185_200,
+    ) -> Route:
+        """Find the most recent usable observed route in bounded one-day requests."""
+
+        if on_or_before.tzinfo is None:
+            raise ValueError("OpenSky lookback time must be timezone-aware")
+        if not 1 <= lookback_days <= 30:
+            raise ValueError("OpenSky lookback must be between 1 and 30 days")
+        selected_day = on_or_before.astimezone(UTC).date()
+        last_error: OpenSkyRouteNotFoundError | None = None
+        for offset in range(lookback_days):
+            day = selected_day - timedelta(days=offset)
+            begin = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+            end = begin + timedelta(days=1) - timedelta(seconds=1)
+            try:
+                return self.route_for_airports(
+                    origin,
+                    destination,
+                    begin=begin,
+                    end=end,
+                    spacing_m=spacing_m,
+                )
+            except OpenSkyRouteNotFoundError as exc:
+                last_error = exc
+        message = (
+            f"OpenSky found no usable {origin.icao} → {destination.icao} observed route "
+            f"in the {lookback_days} days ending {selected_day.isoformat()}"
+        )
+        raise OpenSkyRouteNotFoundError(message) from last_error
 
     def _validate_request(self, begin: datetime, end: datetime, spacing_m: float) -> None:
         if not self.network_enabled:
@@ -222,7 +257,9 @@ class OpenSkyTrackProvider:
                 return None
             if response.status_code == 429:
                 retry_after = response.headers.get("X-Rate-Limit-Retry-After-Seconds", "unknown")
-                raise RuntimeError(f"OpenSky rate limit exhausted; retry after {retry_after} seconds")
+                raise RuntimeError(
+                    f"OpenSky rate limit exhausted; retry after {retry_after} seconds"
+                )
             response.raise_for_status()
             return response.json()
         except RuntimeError:
@@ -240,11 +277,17 @@ class OpenSkyTrackProvider:
                 continue
             if value.get("estArrivalAirport") != destination_icao:
                 continue
-            if not value.get("icao24") or value.get("firstSeen") is None or value.get("lastSeen") is None:
+            if (
+                not value.get("icao24")
+                or value.get("firstSeen") is None
+                or value.get("lastSeen") is None
+            ):
                 continue
             candidates.append(value)
         if not candidates:
-            raise ValueError(f"OpenSky found no departure arriving at {destination_icao}")
+            raise OpenSkyRouteNotFoundError(
+                f"OpenSky found no departure arriving at {destination_icao}"
+            )
         return max(candidates, key=lambda value: int(value["firstSeen"]))
 
     @staticmethod
