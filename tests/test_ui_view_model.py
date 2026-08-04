@@ -146,9 +146,13 @@ def test_pacific_route_display_does_not_span_the_long_way_around() -> None:
     rows = segment_rows(scenario.route, scenario.result)
     corridors = corridor_rows(scenario.route, scenario.result)
 
-    assert all(abs(row["path"][1][0] - row["path"][0][0]) <= 180 for row in rows)
     assert all(
-        current["path"][1][0] == following["path"][0][0]
+        abs(following[0] - current[0]) <= 180
+        for row in rows
+        for current, following in zip(row["path"], row["path"][1:], strict=False)
+    )
+    assert all(
+        current["path"][-1][0] == following["path"][0][0]
         for current, following in zip(rows, rows[1:], strict=False)
     )
     route_longitudes = [point[0] for row in rows for point in row["path"]]
@@ -168,6 +172,26 @@ def test_weather_segments_are_variable_and_explain_their_boundaries() -> None:
     assert scenario.weather_regimes[0].boundary_reason.startswith("Departure")
     assert any("changed" in regime.boundary_reason for regime in scenario.weather_regimes[1:])
     assert len(scenario.segment_atmospheres) == len(scenario.route.segments)
+
+
+def test_weather_segments_retain_observed_polyline_without_shortcuts() -> None:
+    observed_track = route_from_waypoints(
+        [(34.0, -118.0), (42.0, -140.0), (49.0, -165.0), (45.0, 175.0), (36.0, 140.0)],
+        spacing_m=50_000,
+    )
+    scenario = build_demo_scenario(route_override=observed_track)
+    rendered_points = [point for segment in scenario.route.segments for point in segment.path]
+
+    assert scenario.route.waypoints == observed_track.waypoints
+    assert (
+        abs(
+            sum(segment.distance_m for segment in scenario.route.segments)
+            - sum(segment.distance_m for segment in observed_track.segments)
+        )
+        < 1.0
+    )
+    assert all(waypoint in rendered_points for waypoint in observed_track.waypoints)
+    assert all(segment.path for segment in scenario.route.segments)
 
 
 def test_atmosphere_metrics_distinguish_ambient_pressure_and_wind() -> None:

@@ -58,6 +58,7 @@ def route_from_waypoints(
                     end_longitude=point_end[0],
                     distance_m=seg_distance,
                     bearing_deg=seg_bearing % 360,
+                    path=((point_start[1], point_start[0]), (point_end[1], point_end[0])),
                 )
             )
     return Route(
@@ -78,11 +79,7 @@ def interpolate_position(route: Route, progress: float) -> tuple[float, float]:
     elapsed = 0.0
     for segment in route.segments:
         if elapsed + segment.distance_m >= target:
-            offset = target - elapsed
-            lon, lat, _ = _GEOD.fwd(
-                segment.start_longitude, segment.start_latitude, segment.bearing_deg, offset
-            )
-            return lat, lon
+            return _interpolate_segment_distance(segment, target - elapsed)
         elapsed += segment.distance_m
     last = route.segments[-1]
     return last.end_latitude, last.end_longitude
@@ -94,13 +91,33 @@ def interpolate_segment_position(
     """Interpolate one route segment by bounded distance fraction."""
 
     bounded = min(1.0, max(0.0, progress))
-    longitude, latitude, _ = _GEOD.fwd(
-        segment.start_longitude,
-        segment.start_latitude,
-        segment.bearing_deg,
-        segment.distance_m * bounded,
+    return _interpolate_segment_distance(segment, segment.distance_m * bounded)
+
+
+def _segment_path(segment: RouteSegment) -> tuple[tuple[float, float], ...]:
+    if segment.path:
+        return segment.path
+    return (
+        (segment.start_latitude, segment.start_longitude),
+        (segment.end_latitude, segment.end_longitude),
     )
-    return latitude, longitude
+
+
+def _interpolate_segment_distance(segment: RouteSegment, target_m: float) -> tuple[float, float]:
+    """Interpolate along a segment's complete polyline rather than its endpoint chord."""
+
+    bounded_target = min(segment.distance_m, max(0.0, target_m))
+    elapsed = 0.0
+    path = _segment_path(segment)
+    for start, end in zip(path, path[1:], strict=False):
+        bearing, _, distance = _GEOD.inv(start[1], start[0], end[1], end[0])
+        if elapsed + distance >= bounded_target:
+            longitude, latitude, _ = _GEOD.fwd(
+                start[1], start[0], bearing, bounded_target - elapsed
+            )
+            return latitude, longitude
+        elapsed += distance
+    return path[-1]
 
 
 def route_distance_m(route: Route) -> float:
@@ -118,20 +135,25 @@ def corridor_geojson(
     features: list[dict[str, Any]] = []
     for segment in route.segments:
         limit = by_id[segment.segment_id]
-        left_bearing = (segment.bearing_deg - 90) % 360
-        right_bearing = (segment.bearing_deg + 90) % 360
-        slon, slat, _ = _GEOD.fwd(
-            segment.start_longitude, segment.start_latitude, left_bearing, half_width_m
-        )
-        elon, elat, _ = _GEOD.fwd(
-            segment.end_longitude, segment.end_latitude, left_bearing, half_width_m
-        )
-        erlon, erlat, _ = _GEOD.fwd(
-            segment.end_longitude, segment.end_latitude, right_bearing, half_width_m
-        )
-        srlon, srlat, _ = _GEOD.fwd(
-            segment.start_longitude, segment.start_latitude, right_bearing, half_width_m
-        )
+        path = _segment_path(segment)
+        bearings: list[float] = []
+        for index in range(len(path)):
+            start = path[max(0, index - 1)]
+            end = path[min(len(path) - 1, index + 1)]
+            bearing, _, _ = _GEOD.inv(start[1], start[0], end[1], end[0])
+            bearings.append(bearing)
+        left_edge: list[list[float]] = []
+        right_edge: list[list[float]] = []
+        for (latitude, longitude), bearing in zip(path, bearings, strict=True):
+            left_lon, left_lat, _ = _GEOD.fwd(
+                longitude, latitude, (bearing - 90) % 360, half_width_m
+            )
+            right_lon, right_lat, _ = _GEOD.fwd(
+                longitude, latitude, (bearing + 90) % 360, half_width_m
+            )
+            left_edge.append([left_lon, left_lat])
+            right_edge.append([right_lon, right_lat])
+        polygon = [*left_edge, *reversed(right_edge), left_edge[0]]
         features.append(
             {
                 "type": "Feature",
@@ -144,9 +166,7 @@ def corridor_geojson(
                 },
                 "geometry": {
                     "type": "Polygon",
-                    "coordinates": [
-                        [[slon, slat], [elon, elat], [erlon, erlat], [srlon, srlat], [slon, slat]]
-                    ],
+                    "coordinates": [polygon],
                 },
             }
         )

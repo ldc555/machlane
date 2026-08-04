@@ -55,6 +55,7 @@ def test_mission_catalog_uses_real_endpoints_and_wgs84_distance() -> None:
         "jfk_lhr",
         "jfk_sju",
         "bos_hnl",
+        "lax_nrt",
     }
     assert "den_nrt" not in mission_ids
     assert "lax_hnl" not in mission_ids

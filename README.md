@@ -228,18 +228,24 @@ selected airport pair is only a search definition. If OpenSky has no matching di
 the workspace stops; it does not draw a shortest-path or silently substitute another route. The
 current candidate set covers DFW–JFK, DFW–LAX and LAX–JFK overland tests, BOS–HNL oceanic U.S. travel,
 DFW–SJU and JFK–SJU U.S.-territory travel, and JFK–LHR transatlantic travel. DEN–NRT is deliberately
-excluded because no observed route was available for the requested test.
+excluded because no observed route was available for the requested test. LAX–NRT provides the
+U.S.–Japan search instead, and still fails closed if OpenSky has no observation in the selected
+lookback window.
 
 After a track loads, pressure, temperature and wind split its geometry into variable-length
 atmospheric regimes. The current mock segmentation starts a new regime after a 1 hPa flight-level
 pressure change, a 0.7 K temperature change, or a 2.5 m/s wind-vector change. Those thresholds are
 test fixtures, not validated operational margins. The segmentation receives atmosphere through a
 provider interface, so the same observed geometry can later use HRRR over CONUS and GEFS for global
-and oceanic coverage without changing the route or planner contracts.
+and oceanic coverage without changing the route or planner contracts. Each regime retains the full
+OpenSky polyline and along-track distance; it is never replaced by a direct chord between weather
+boundaries.
 
 The map's blue-to-red corridor shows **ambient pressure at the planner altitude**. It does not show a
-sonic-boom footprint. Surface boom colors must wait for a propagation engine that produces receiver
-waveforms and ground overpressure.
+sonic-boom footprint. Its band is centered on the retained OpenSky polyline and extends one statute
+mile to either side. Independent map toggles show or hide the yellow observed track and atmospheric
+segments. Surface boom colors must wait for a propagation engine that produces receiver waveforms
+and ground overpressure.
 
 ### Atmosphere
 
@@ -420,7 +426,9 @@ open-mco demo
 The map-first workspace keeps only the observed route, phase-aware mock aircraft state, mock
 atmospheric corridor, and calculation readiness in the primary view. Aviation distances are
 displayed primarily in nautical miles. Moving the aircraft updates its phase and local atmosphere
-without recomputing the cached route plan.
+without recomputing the cached route plan. The phase fixture keeps takeoff, climb, and landing
+subsonic; acceleration to the mock supersonic cruise occurs only after climb, with deceleration and
+descent before arrival.
 
 To make OpenSky the route source, create an API client on the OpenSky account page and export the two
 values in the same Terminal session before starting Streamlit:

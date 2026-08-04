@@ -159,6 +159,26 @@ class RouteSegment(FrozenModel):
     end_longitude: float
     distance_m: float
     bearing_deg: float
+    path: tuple[tuple[float, float], ...] = ()
+
+    @model_validator(mode="after")
+    def validate_path(self) -> RouteSegment:
+        """Require optional polyline geometry to agree with the segment endpoints."""
+
+        if not self.path:
+            return self
+        if len(self.path) < 2:
+            raise ValueError("route segment path requires at least two points")
+        if self.path[0] != (self.start_latitude, self.start_longitude):
+            raise ValueError("route segment path must begin at the segment start")
+        if self.path[-1] != (self.end_latitude, self.end_longitude):
+            raise ValueError("route segment path must end at the segment end")
+        for latitude, longitude in self.path:
+            if not isfinite(latitude) or not isfinite(longitude):
+                raise ValueError("route segment path coordinates must be finite")
+            if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+                raise ValueError("route segment path coordinates must be valid WGS-84")
+        return self
 
 
 class RouteSourceMetadata(FrozenModel):
@@ -236,9 +256,7 @@ class NearFieldSignature(FrozenModel):
 class PropagationPhysicsOptions(FrozenModel):
     """Effects a real solver must explicitly include or reject for a declared case."""
 
-    ray_families: tuple[
-        Literal["PRIMARY", "SECONDARY_DIRECT", "SECONDARY_INDIRECT"], ...
-    ] = Field(
+    ray_families: tuple[Literal["PRIMARY", "SECONDARY_DIRECT", "SECONDARY_INDIRECT"], ...] = Field(
         default=("PRIMARY", "SECONDARY_DIRECT", "SECONDARY_INDIRECT"),
         min_length=1,
     )

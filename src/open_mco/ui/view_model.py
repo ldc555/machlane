@@ -232,14 +232,14 @@ def segment_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
                 "start_nmi": round(start_nmi, 1),
                 "end_nmi": round(cumulative_m * METERS_TO_NAUTICAL_MILES, 1),
                 "path": [
-                    [
-                        display_longitude(segment.start_longitude, longitude_reference),
-                        segment.start_latitude,
-                    ],
-                    [
-                        display_longitude(segment.end_longitude, longitude_reference),
-                        segment.end_latitude,
-                    ],
+                    [display_longitude(longitude, longitude_reference), latitude]
+                    for latitude, longitude in (
+                        segment.path
+                        or (
+                            (segment.start_latitude, segment.start_longitude),
+                            (segment.end_latitude, segment.end_longitude),
+                        )
+                    )
                 ],
                 "bearing_deg": round(segment.bearing_deg, 1),
                 "mach": limit.selected_mach,

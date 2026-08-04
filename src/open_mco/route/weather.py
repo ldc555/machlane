@@ -12,8 +12,6 @@ from pyproj import Geod
 from open_mco.atmosphere import AtmosphereProvider
 from open_mco.models import Route, RouteSegment
 
-from .geometry import route_from_waypoints
-
 _GEOD = Geod(ellps="WGS84")
 
 
@@ -141,7 +139,6 @@ def segment_route_by_weather(
         )
         for segment in sampled_route.segments
     ]
-    boundaries = [sampled_route.waypoints[0]]
     grouped_samples: list[list[_WeatherSample]] = []
     boundary_reasons = ["Departure / initial weather regime"]
     regime = [samples[0]]
@@ -150,23 +147,37 @@ def segment_route_by_weather(
         reason = _boundary_reason(sample, regime, active_settings)
         if reason is not None and len(regime) >= active_settings.minimum_samples_per_segment:
             grouped_samples.append(regime)
-            boundaries.append((sample.segment.start_latitude, sample.segment.start_longitude))
             boundary_reasons.append(reason)
             regime = [sample]
         else:
             regime.append(sample)
     if len(regime) < active_settings.minimum_samples_per_segment and grouped_samples:
         grouped_samples[-1].extend(regime)
-        boundaries.pop()
         boundary_reasons.pop()
     else:
         grouped_samples.append(regime)
-    boundaries.append(sampled_route.waypoints[-1])
-
-    route = route_from_waypoints(
-        boundaries,
-        spacing_m=50_000_000,
+    segments = tuple(
+        RouteSegment(
+            segment_id=f"S{index + 1:04d}",
+            start_latitude=group[0].segment.start_latitude,
+            start_longitude=group[0].segment.start_longitude,
+            end_latitude=group[-1].segment.end_latitude,
+            end_longitude=group[-1].segment.end_longitude,
+            distance_m=sum(sample.segment.distance_m for sample in group),
+            bearing_deg=group[0].segment.bearing_deg,
+            path=(
+                (group[0].segment.start_latitude, group[0].segment.start_longitude),
+                *tuple(
+                    (sample.segment.end_latitude, sample.segment.end_longitude) for sample in group
+                ),
+            ),
+        )
+        for index, group in enumerate(grouped_samples)
+    )
+    route = Route(
         name=f"{sampled_route.name} · weather-regime segmentation",
+        waypoints=sampled_route.waypoints,
+        segments=segments,
         source=sampled_route.source,
         observations=sampled_route.observations,
     )

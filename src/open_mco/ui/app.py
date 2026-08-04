@@ -32,7 +32,6 @@ from open_mco.ui.view_model import (
     active_segment_index,
     aircraft_view,
     atmosphere_metrics,
-    corridor_rows,
     display_longitude,
     mock_flight_state,
     mock_live_metrics,
@@ -296,9 +295,6 @@ for row in rows:
         pressure_scale_min_hpa,
         pressure_scale_max_hpa,
     )
-corridors = corridor_rows(demo.route, demo.result)
-for corridor, row in zip(corridors, rows, strict=True):
-    corridor["color"] = [*row["color"][:3], 48]
 distance_km = route_distance_m(display_route) / 1000
 distance_nmi = distance_km / 1.852
 map_latitude, map_longitude = interpolate_position(display_route, 0.5)
@@ -345,43 +341,65 @@ active = rows[active_index]
 active_limit = demo.result.segment_limits[active_index]
 active_altitude_m = active_limit.selected_altitude_m or 0.0
 active_atmosphere = demo.segment_atmospheres[active_index]
+active_aircraft = aircraft_view(display_route, progress, map_longitude)
 weather_at_altitude = atmosphere_metrics(
-    active_atmosphere, active_altitude_m, float(active["bearing_deg"])
+    active_atmosphere, active_altitude_m, active_aircraft["bearing_deg"]
 )
 
-# Route, corridors, waypoints and labels never move while the slider does, so build them once and
-# let the fragment append only the two moving aircraft layers each time it reruns.
-static_map_layers = [
+# Route geometry and labels never move while the slider does, so build them once. Every weather
+# path below comes from the grouped segment's retained OpenSky polyline, never its endpoint chord.
+atmosphere_map_layers = [
     pdk.Layer(
-        "PolygonLayer",
-        corridors,
-        get_polygon="polygon",
-        get_fill_color="color",
-        get_line_color=[45, 212, 191, 120],
-        line_width_min_pixels=1,
+        "PathLayer",
+        rows,
+        id="one-mile-atmosphere-band",
+        get_path="path",
+        get_color="color",
+        get_width=3_218.688,
+        width_units="meters",
         pickable=True,
     ),
     pdk.Layer(
         "PathLayer",
         rows,
+        id="weather-regime-centerlines",
         get_path="path",
         get_color="color",
         width_min_pixels=3,
         pickable=True,
     ),
+]
+observed_track_layers = [
     pdk.Layer(
         "ScatterplotLayer",
         [
             {"position": [display_longitude(lon, map_longitude), lat]}
-            for lat, lon in demo.route.waypoints
+            for lat, lon in observed_route.waypoints
         ],
         get_position="position",
-        get_radius=2700,
-        get_fill_color=[226, 236, 246, 220],
+        get_radius=2200,
+        get_fill_color=[255, 213, 0, 220],
         get_line_color=[6, 12, 20, 255],
         line_width_min_pixels=2,
         stroked=True,
     ),
+    pdk.Layer(
+        "PathLayer",
+        [
+            {
+                "path": [
+                    [display_longitude(longitude, map_longitude), latitude]
+                    for latitude, longitude in observed_route.waypoints
+                ]
+            }
+        ],
+        id="opensky-observed-track",
+        get_path="path",
+        get_color=[255, 213, 0, 235],
+        width_min_pixels=4,
+    ),
+]
+label_map_layers = [
     pdk.Layer(
         "TextLayer",
         [
@@ -407,24 +425,6 @@ static_map_layers = [
         get_color=[226, 236, 246, 230],
     ),
 ]
-static_map_layers.insert(
-    2,
-    pdk.Layer(
-        "PathLayer",
-        [
-            {
-                "path": [
-                    [display_longitude(longitude, map_longitude), latitude]
-                    for latitude, longitude in observed_route.waypoints
-                ]
-            }
-        ],
-        id="opensky-observed-track",
-        get_path="path",
-        get_color=[255, 213, 0, 235],
-        width_min_pixels=4,
-    ),
-)
 
 
 @fragment
@@ -458,7 +458,7 @@ def render_workspace() -> None:
         drag_weather = atmosphere_metrics(
             demo.segment_atmospheres[drag_index],
             flight_altitude_ft / METERS_TO_FEET,
-            float(drag_row["bearing_deg"]),
+            aircraft["bearing_deg"],
         )
         if mock_mode:
             drag_weather = mock_live_metrics(drag_weather, mission_id, drag_progress)
@@ -480,7 +480,9 @@ def render_workspace() -> None:
         title_left, title_right = st.columns([3, 1])
         with title_left:
             st.subheader("Atmospheric corridor")
-            st.caption("Blue = lower ambient pressure · red = higher ambient pressure")
+            st.caption(
+                "Blue = lower ambient pressure · red = higher ambient pressure · centered on OpenSky"
+            )
         with title_right:
             st.markdown(
                 '<div style="text-align:right"><span class="eligible">AMBIENT PRESSURE</span></div>',
@@ -490,6 +492,17 @@ def render_workspace() -> None:
             f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Geometry <b>OpenSky observed</b></span><span>Pressure <b>{pressure_min_hpa:.1f}–{pressure_max_hpa:.1f} hPa at cruise</b></span><span>Boom <b>not modeled</b></span></div>',
             unsafe_allow_html=True,
         )
+        route_toggle, segment_toggle, toggle_note = st.columns([1, 1.15, 2.5])
+        with route_toggle:
+            show_observed_track = st.toggle("OpenSky track", value=True, key="show_observed_track")
+        with segment_toggle:
+            show_atmosphere_segments = st.toggle(
+                "Atmosphere segments", value=True, key="show_atmosphere_segments"
+            )
+        with toggle_note:
+            st.caption(
+                "Weather band extends exactly 1 statute mile on each side of the observed track."
+            )
 
         aircraft_layers = [
             pdk.Layer(
@@ -530,9 +543,15 @@ def render_workspace() -> None:
                 get_angle=aircraft["bearing_deg"] - PLANE_ARTWORK_HEADING_OFFSET_DEG,
             ),
         ]
+        visible_map_layers: list[pdk.Layer] = []
+        if show_atmosphere_segments:
+            visible_map_layers.extend(atmosphere_map_layers)
+        if show_observed_track:
+            visible_map_layers.extend(observed_track_layers)
+        visible_map_layers.extend(label_map_layers)
         st.pydeck_chart(
             pdk.Deck(
-                layers=[*static_map_layers, *aircraft_layers],
+                layers=[*visible_map_layers, *aircraft_layers],
                 map_style=pdk.map_styles.CARTO_DARK,
                 initial_view_state=pdk.ViewState(
                     latitude=map_latitude,
@@ -551,7 +570,7 @@ def render_workspace() -> None:
         legend_left, legend_right = st.columns([2, 1])
         with legend_left:
             st.caption(
-                f"Blue {pressure_scale_min_hpa:.1f} hPa → red {pressure_scale_max_hpa:.1f} hPa · ambient pressure scale, not boom overpressure"
+                f"Blue {pressure_scale_min_hpa:.1f} hPa → red {pressure_scale_max_hpa:.1f} hPa · exact OpenSky polyline, not an ideal route or boom overpressure"
             )
         with legend_right:
             st.caption(f"{drag_progress:.0%} complete · {drag_row['segment']}")

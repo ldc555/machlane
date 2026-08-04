@@ -108,6 +108,7 @@ _AIRPORTS = {
             "TJSJ", "SJU", "Luis Munoz Marin International Airport", 18.439400, -66.001801, "PR-U-A"
         ),
         Airport("EGLL", "LHR", "London Heathrow Airport", 51.470748, -0.459909, "GB-ENG"),
+        Airport("RJAA", "NRT", "Narita International Airport", 35.768580, 140.388714, "JP-12"),
     )
 }
 
@@ -186,6 +187,14 @@ _MISSIONS = (
         "North Atlantic",
         "global_oceanic",
         "Classic transatlantic long-haul test case; an observed track is not a future NAT clearance.",
+    ),
+    _mission(
+        "lax_nrt",
+        "LAX",
+        "NRT",
+        "U.S. to Japan",
+        "global_oceanic",
+        "Transpacific test case that runs only when OpenSky returns an observed LAX–Narita track.",
     ),
 )
 

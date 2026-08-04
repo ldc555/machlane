@@ -15,6 +15,7 @@ from open_mco.models import (
     SegmentLimit,
 )
 from open_mco.physics import BoomPropagationEngine
+from open_mco.route import interpolate_segment_position
 from open_mco.terrain import TerrainProvider
 
 
@@ -53,8 +54,7 @@ class GridSearchPlanner:
         floor_value = aircraft.operating_limits.minimum_cruise_altitude
         floor = 0.0 if floor_value is None else float(floor_value.value_si)
         for segment in route.segments:
-            midpoint_lat = (segment.start_latitude + segment.end_latitude) / 2
-            midpoint_lon = (segment.start_longitude + segment.end_longitude) / 2
+            midpoint_lat, midpoint_lon = interpolate_segment_position(segment)
             atmosphere = self.atmosphere_provider.profile(midpoint_lat, midpoint_lon, valid_time)
             terrain = self.terrain_provider.profile(segment)
             evaluations: list[CandidateEvaluation] = []
