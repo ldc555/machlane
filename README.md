@@ -188,107 +188,98 @@ requires near-field pressure, three-dimensional rays, nonlinearity, absorption/r
 wind, terrain/ground interaction, primary and secondary paths, ground waveforms, and acoustical metrics.
 See [docs/SONIC_BOOM_PIPELINE.md](docs/SONIC_BOOM_PIPELINE.md).
 
-## 8. Data sources
+## 8. Where the data comes from
 
-### Routes and distance
+MachLane keeps each source responsible for one job. A route source does not become weather, ambient
+pressure does not become sonic-boom overpressure, and an observed subsonic flight does not become a
+validated future supersonic trajectory.
 
-The UI ships with a small catalog of conceptual future high-speed missions: DFW–JFK, DFW–LAX,
-LAX–JFK, BOS–HNL, DFW–SJU, JFK–LHR, and DEN–NRT. Endpoints are real airport reference points
-retrieved from the public-domain [OurAirports data dump](https://ourairports.com/data/) on
-2026-08-04. The points are committed as a reviewed subset so opening the UI never depends on a
-network request or a changing upstream file.
+| Source | Data retrieved | Used for | Not evidence of |
+|---|---|---|---|
+| [OpenSky REST API](https://openskynetwork.github.io/opensky-api/rest.html) | Recent observed flights and downsampled tracks: time, WGS-84 position, barometric altitude, true track, ground/air state | Actual path context and route-shape comparison | Filed route, ATC clearance, future SST corridor, Mach schedule, or boom compliance |
+| [OurAirports](https://ourairports.com/data/) | Reviewed airport reference coordinates | Stable network-free route endpoints and fallback geometry | Published airway or operational route |
+| [NOAA HRRR](https://rapidrefresh.noaa.gov/hrrr/) via [Herbie](https://github.com/blaylockbk/Herbie) | Regional forecast pressure levels, temperature, wind, and available humidity | Nominal atmosphere over the CONUS portion of a route | Global coverage or validated boom prediction |
+| [NOAA GEFS](https://www.emc.ncep.noaa.gov/emc/pages/numerical_forecast_systems/gefs.php) via Herbie | Global ensemble forecast members | Weather uncertainty and oceanic/global atmosphere | Calibrated regulatory reliability by itself |
+| [ERA5](https://cds.climate.copernicus.eu/datasets/reanalysis-era5-pressure-levels) | Global historical pressure-level reanalysis | Repeatable back-tests and validation cases | Live forecast |
+| [USGS 3DEP](https://www.usgs.gov/3d-elevation-program) | U.S. land elevation samples | Terrain interaction and receiver elevation where covered | Global terrain or ocean bathymetry |
+| NASA STCA workbook | Reviewed aircraft geometry, limits, mass and future performance tables when populated | Aircraft source model and operating envelope | Valid near-field pressure signature unless that data is supplied and reviewed |
 
-Each concept uses the shortest path on the WGS-84 ellipsoid, calculated with `pyproj.Geod`. A fine
-internal atmosphere sampling grid is merged into variable-length analysis segments: adjacent samples
-remain in one segment until pressure, temperature, or the wind vector leaves the current uniform
-regime. The sampling interval is a numerical input; it is not the output segment length. It is
-intentionally **not** described as a filed route,
-published airway, daily oceanic track, ATC clearance, or approved supersonic corridor. Current U.S.
-procedures can later be imported from the FAA's 28-day [CIFP product](https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/download/),
-but present-day subsonic procedures should not be passed off as future hypersonic routing.
+### Route geometry: observed path versus stable corridor
 
-The opt-in OpenSky adapter can replace the displayed geodesic with one recent observed flight track.
-It searches departures for the selected airport pair, retrieves the latest matching experimental
-track, normalizes it to WGS-84 route geometry, and records the flight identity, observation window,
-source URL, limitations, and raw-response checksum. OpenSky tracks are downsampled observations with
-possible reception gaps; they are neither filed flight plans nor approved future supersonic routes.
-The UI never contacts OpenSky until the user enables the route source and presses **Fetch observed
-track**. OAuth client credentials come only from `OPENSKY_CLIENT_ID` and
-`OPENSKY_CLIENT_SECRET`; create them on the OpenSky account page and never commit them.
+OpenSky's official API root is `https://opensky-network.org/api`. MachLane uses only the endpoints
+needed for route context:
 
-OpenSky permits non-profit research/education under its agreement, while commercial or operational
-REST API use requires written permission. Every user is responsible for reviewing and complying with
-the current [OpenSky Terms of Use](https://opensky-network.org/about/terms-of-use). MachLane does not
-redistribute fetched OpenSky data in the repository.
+1. `GET /flights/departure` finds a recent departure from the selected origin and matching arrival
+   airport.
+2. `GET /tracks/all` retrieves that aircraft's experimental track.
+3. The adapter validates the response, preserves the timestamped observations, normalizes the path,
+   and records a checksum and limitations.
 
-Coriolis is not an extra correction to geometric distance. Earth shape belongs in the WGS-84
-geodesic; Earth rotation and atmospheric dynamics belong in the forecast model and its wind field.
-Fuel and trip time therefore remain **NOT MODELED** until reviewed aircraft performance data can be
-integrated segment-by-segment with along-track HRRR or GEFS winds. Adding a percentage to distance
-would look precise while double-counting or inventing physics.
+OpenSky now requires OAuth2 client credentials for these authenticated calls. Set
+`OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in the environment; the adapter obtains and refreshes
+the short-lived bearer token. Tracks older than 30 days are unavailable through this REST endpoint.
+Requests are credit-limited, so the UI fetches once per route/date and keeps the result in the
+current session. Credentials and fetched tracks are never committed.
 
-### Operational U.S. forecast
+Observed paths vary with weather, ATC, traffic, runway configuration and day-to-day operations. A
+stable research corridor is therefore a separate object: a reviewed centerline plus lateral bounds.
+MachLane can overlay an observed OpenSky path for context, while pressure, temperature and wind split
+the stable corridor into variable-length atmospheric regimes. The current synthetic segmentation
+starts a new regime after a 1 hPa flight-level pressure change, a 0.7 K temperature change, or a
+2.5 m/s wind-vector change. Those thresholds are test fixtures, not validated operational margins.
 
-**HRRR** is the initial nominal forecast source for the conterminous United States. The
-`fetch-weather` command retrieves a pressure-level subset through Herbie only when explicitly
-invoked, then writes a normalized profile with its model cycle, valid time, source URL, and local
-GRIB checksum. The default demo never contacts the network.
+The map's blue-to-red corridor shows **ambient pressure at the planner altitude**. It does not show a
+sonic-boom footprint. Surface boom colors must wait for a propagation engine that produces receiver
+waveforms and ground overpressure.
 
-Required upper-air variables include, at minimum:
+### Atmosphere
 
-- temperature;
-- pressure or geopotential height;
-- zonal wind;
-- meridional wind;
-- humidity when required by the propagation model.
+- **HRRR** is the preferred nominal forecast inside the conterminous United States.
+- **GEFS** supplies global coverage and ensemble uncertainty for U.S. territories, oceanic routes,
+  and international missions.
+- **ERA5** supplies repeatable historical atmosphere for back-testing, not live prediction.
 
-### Forecast uncertainty
-
-**GEFS** provides multiple forecast members. The same explicit fetch path accepts a declared
-member and records it in the source request. The first planning implementation treats member
-outcomes as an empirical scenario distribution.
-
-GEFS is global, so it is the forecast baseline for Hawaii, Puerto Rico, and international or
-oceanic missions. HRRR remains a higher-resolution regional supplement where the route is inside
-its CONUS domain; the current adapter does not claim HRRR coverage for U.S. territories.
-
-A high fraction of passing ensemble members must not automatically be described as validated 95% regulatory reliability. Ensemble calibration, dependence, model error, representativeness, and conservative margin selection require separate justification.
-
-### Historical development
-
-**ERA5** is used for repeatable historical cases and back-testing. The explicit CDS retrieval path
-requires the contributor's own accepted dataset terms and `~/.cdsapirc` credentials; downloaded
-GRIB files are cached and checksummed like NOAA inputs. ERA5 has global coverage, but it is
-reanalysis rather than a live forecast.
+The normalized atmospheric profile contains altitude, pressure, temperature, zonal wind, meridional
+wind, and humidity when available. Forecast cycle, valid time, member, request, source URL, and local
+checksum travel with the data. Live adapters are opt-in; the default UI remains visibly mock until a
+real forecast run is connected to the planner.
 
 ### Terrain
 
-Use **USGS 3DEP** on covered U.S. land, including available U.S.-territory products. `fetch-terrain`
-samples one declared route leg through official
-USGS cross-section and elevation-point services and serializes the normalized terrain profile.
-It is not a global ocean-floor or international terrain source.
+USGS 3DEP is used only where it has U.S. land coverage. Every terrain profile retains the service,
+datum, resolution, interpolation method, retrieval time, and checksum when a local artifact exists.
+International terrain and ocean-floor data require a separate reviewed global source.
 
-- product and resolution;
-- horizontal datum;
-- vertical datum;
-- retrieval date;
-- source tile or service;
-- interpolation method;
-- checksum when stored locally.
+### Aircraft speed and flight phase
+
+OpenSky tracks describe real conventional flights but do not provide a validated performance model
+for the future STCA aircraft. The mock UI therefore uses an explicitly synthetic phase schedule:
+subsonic takeoff and climb, transonic acceleration after reaching the cruise corridor, supersonic
+cruise, deceleration, subsonic descent, and landing. The transition location is a UI fixture—not a
+claim that an SST always accelerates at that percentage of a route.
+
+[OpenAP](https://openap.dev/openap.html) is a strong open-source option for conventional aircraft
+phase identification, thrust, drag, fuel and trajectory studies. It can be added as a comparison
+adapter, but it must not substitute for reviewed STCA-specific climb, acceleration, cruise, descent,
+engine and mass data.
+
+Coriolis is not an extra distance correction. WGS-84 geodesics determine geometric distance; Earth
+rotation enters through the atmospheric model and winds. Fuel and trip time remain `NOT_MODELED`
+until the aircraft performance model is integrated segment-by-segment with those winds.
 
 ### Adapter readiness
 
-| Source | Retrieval | Verification boundary |
+| Source | Current status | Boundary |
 |---|---|---|
-| NOAA HRRR | Implemented through Herbie | Live historical pressure-profile fetch completed; not planner-validated |
-| NOAA GEFS | Implemented through Herbie, including member identity | Live `p01` pressure-profile fetch completed; common native levels only |
-| USGS 3DEP | Implemented through official USGS HTTPS services | Live route-profile fetch completed; no GIS installation required |
-| ERA5 | Implemented through the CDS API | Credential-gated; test double verified because no CDS credentials are stored in the repository |
-| OpenSky observed tracks | Implemented through OAuth2 REST endpoints | Credential-gated; experimental and limited to recent observations, never treated as a filed route |
-| NOAA RRFS/REFS | Not implemented | Track the [announced October 2026 production transition](https://www.weather.gov/notification/) |
+| OpenSky | Implemented: OAuth2, token refresh, airport-pair flight lookup, track normalization, provenance and rate-limit errors | Recent experimental observations only |
+| HRRR | Fetch and normalization implemented | Not yet wired into the validated planner |
+| GEFS | Member-aware fetch and normalization implemented | Ensemble interpretation still requires validation |
+| ERA5 | Credential-gated fetch implemented | Historical only |
+| USGS 3DEP | Route-profile fetch implemented | U.S. land coverage only |
+| Sonic-boom propagation | Interface and validation boundaries implemented | Physical engine not selected or validated |
 
-These statuses describe data ingestion only. No source in this table turns the mock propagation
-result into an operational or compliance determination.
+Data ingestion is not a compliance result. Until the final row is complete, the UI must continue to
+say `NOT_MODELED` for sonic-boom footprint and ground overpressure.
 
 ## 9. Aircraft database
 
@@ -417,11 +408,25 @@ open-mco demo
 
 ### Open the user interface
 
-The map-first workspace keeps the synthetic aircraft, route corridor, active-segment recommendation,
-atmospheric profile, model explanation, validation state, provenance, and evidence generation in one
-screen. Aviation distances are displayed primarily in nautical miles. DEN–NRT is routed over Alaska
-and unwrapped around the antimeridian for one continuous map path. Moving the aircraft updates the inspector without
-recomputing the cached route plan.
+The map-first workspace keeps only the route, phase-aware aircraft state, atmospheric corridor, and
+calculation readiness in the primary view. Aviation distances are displayed primarily in nautical
+miles. DEN–NRT is unwrapped around the antimeridian for one continuous map path. Moving the aircraft
+updates its phase and local atmosphere without recomputing the cached route plan.
+
+To make OpenSky the route source, create an API client on the OpenSky account page and export the two
+values in the same Terminal session before starting Streamlit:
+
+```bash
+cd /path/to/machlane
+source .venv/bin/activate
+export OPENSKY_CLIENT_ID="paste-your-client-id-here"
+export OPENSKY_CLIENT_SECRET="paste-your-client-secret-here"
+streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 8501
+```
+
+Do not paste the secret into `.env.example`, source code, Git, screenshots, issues, or chat. The UI
+automatically makes one route attempt for the selected mission and date, then keeps that result in
+the current Streamlit session. Use **Refresh observed route** only when another request is needed.
 
 ```bash
 open-mco ui
@@ -435,7 +440,8 @@ streamlit run src/open_mco/ui/app.py
 
 ### Fetch reviewed real-data inputs
 
-Real-data retrieval is a separate, explicit step. It never silently replaces the synthetic demo.
+Weather and terrain retrieval are separate explicit steps. OpenSky route retrieval is observed-first
+in the UI once credentials are present; it never changes the mock weather or boom status.
 
 ```bash
 open-mco fetch-weather \
@@ -467,6 +473,11 @@ open-mco fetch-terrain \
   --end-latitude 38.7487 --end-longitude -90.3700 \
   --sample-spacing-m 1000 \
   --output data/processed/denver_st_louis_terrain.json
+
+open-mco fetch-route \
+  --mission-id dfw_jfk \
+  --date 2026-08-03 \
+  --output data/processed/opensky_dfw_jfk.json
 ```
 
 Each weather command downloads only the requested GRIB pressure-level fields, not a whole model

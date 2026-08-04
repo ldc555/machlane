@@ -33,7 +33,9 @@ from open_mco.ui.view_model import (
     atmosphere_metrics,
     corridor_rows,
     display_longitude,
+    mock_flight_state,
     mock_live_metrics,
+    pressure_color,
     segment_rows,
 )
 
@@ -123,7 +125,7 @@ h1,h2,h3 { letter-spacing:-.02em; }
 )
 
 
-SCENARIO_CACHE_SCHEMA = "weather-regimes-v2-route-source"
+SCENARIO_CACHE_SCHEMA = "weather-regimes-v3-pressure-corridor"
 
 
 @st.cache_resource(show_spinner=False)
@@ -177,11 +179,10 @@ with st.container(border=True):
         [2.1, 1.2, 1.25], vertical_alignment="bottom"
     )
     with source_control:
-        use_opensky = st.toggle(
-            "Use an observed OpenSky track",
-            value=False,
-            key="use_opensky_route",
-            help="Explicitly fetches one recent observed trajectory. OpenSky tracks are experimental and are not filed routes.",
+        st.markdown("**Observed route · OpenSky**")
+        st.caption(
+            "Loads the latest matching departure once credentials are configured. "
+            "Falls back safely to the concept corridor."
         )
     yesterday = datetime.now(UTC).date() - timedelta(days=1)
     with source_date:
@@ -190,7 +191,6 @@ with st.container(border=True):
             value=yesterday,
             min_value=yesterday - timedelta(days=29),
             max_value=yesterday,
-            disabled=not use_opensky,
             key="opensky_observed_date",
         )
     credentials_configured = bool(
@@ -198,13 +198,20 @@ with st.container(border=True):
     )
     with source_action:
         fetch_opensky = st.button(
-            "Fetch observed track",
-            disabled=not use_opensky or not credentials_configured,
+            "Refresh observed route",
+            disabled=not credentials_configured,
             width="stretch",
         )
 
-    opensky_key = f"opensky-route:{mission_id}"
-    if fetch_opensky:
+    opensky_key = f"opensky-route:{mission_id}:{observed_date.isoformat()}"
+    opensky_attempt_key = f"opensky-attempt:{mission_id}:{observed_date.isoformat()}"
+    automatic_fetch = (
+        credentials_configured
+        and opensky_key not in st.session_state
+        and opensky_attempt_key not in st.session_state
+    )
+    if fetch_opensky or automatic_fetch:
+        st.session_state[opensky_attempt_key] = True
         begin = datetime.combine(observed_date, datetime.min.time(), tzinfo=UTC)
         end = begin + timedelta(days=1) - timedelta(seconds=1)
         try:
@@ -219,21 +226,20 @@ with st.container(border=True):
         except (RuntimeError, ValueError, OSError) as exc:
             st.error(f"OpenSky import failed: {exc}")
 
-    observed_route_json = st.session_state.get(opensky_key) if use_opensky else None
-    if use_opensky and not credentials_configured:
+    observed_route_json = st.session_state.get(opensky_key)
+    if not credentials_configured:
         st.warning(
-            "OpenSky is ready but not configured. Create an API client, export "
-            "OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET, then restart Streamlit."
+            "OpenSky credentials are missing. Set OPENSKY_CLIENT_ID and "
+            "OPENSKY_CLIENT_SECRET in Terminal, then restart Streamlit."
         )
-    elif use_opensky and observed_route_json is None:
+    elif observed_route_json is None:
         st.caption(
-            "No observed track loaded yet. The conceptual geodesic remains active until Fetch succeeds."
+            "No observed track was available. The conceptual corridor remains active."
         )
-    if use_opensky:
-        st.caption(
-            "Research use only · OpenSky commercial or operational API use requires permission. "
-            "[Terms](https://opensky-network.org/about/terms-of-use)"
-        )
+    st.caption(
+        "Experimental, downsampled observed path — not a filed route. "
+        "[OpenSky terms](https://opensky-network.org/about/terms-of-use)"
+    )
 
 demo = scenario(mission_id, SCENARIO_CACHE_SCHEMA, observed_route_json)
 observed_route = (
@@ -242,15 +248,7 @@ observed_route = (
 display_route = observed_route or demo.route
 rows = segment_rows(demo.route, demo.result)
 regime_by_id = {regime.segment_id: regime for regime in demo.weather_regimes}
-segment_palette = (
-    [45, 212, 191, 225],
-    [96, 165, 250, 225],
-    [167, 139, 250, 225],
-    [251, 191, 36, 225],
-    [244, 114, 182, 225],
-    [52, 211, 153, 225],
-)
-for index, row in enumerate(rows):
+for row in rows:
     regime = regime_by_id[str(row["segment"])]
     row.update(
         {
@@ -258,14 +256,25 @@ for index, row in enumerate(rows):
             "weather_samples": regime.sample_count,
             "regime_temperature_c": regime.temperature_k - 273.15,
             "regime_pressure_hpa": regime.pressure_hpa,
+            "pressure_label": f"{regime.pressure_hpa:.1f}",
             "regime_wind_kt": regime.wind_speed_mps * 1.943844492,
             "ray_status": "NOT MODELED",
-            "color": segment_palette[index % len(segment_palette)],
         }
     )
+pressure_values = [float(row["regime_pressure_hpa"]) for row in rows]
+pressure_min_hpa = min(pressure_values)
+pressure_max_hpa = max(pressure_values)
+pressure_scale_min_hpa = pressure_min_hpa - 0.5
+pressure_scale_max_hpa = pressure_max_hpa + 0.5
+for row in rows:
+    row["color"] = pressure_color(
+        float(row["regime_pressure_hpa"]),
+        pressure_scale_min_hpa,
+        pressure_scale_max_hpa,
+    )
 corridors = corridor_rows(demo.route, demo.result)
-for index, corridor in enumerate(corridors):
-    corridor["color"] = [*segment_palette[index % len(segment_palette)][:3], 48]
+for corridor, row in zip(corridors, rows, strict=True):
+    corridor["color"] = [*row["color"][:3], 48]
 distance_km = route_distance_m(display_route) / 1000
 distance_nmi = distance_km / 1.852
 map_latitude, map_longitude = interpolate_position(display_route, 0.5)
@@ -288,33 +297,27 @@ else:
         "experimental/downsampled, not a filed route or future supersonic approval."
     )
 
-summary_columns = st.columns(4)
+summary_columns = st.columns(3)
 summary_columns[0].metric(
-    "Route distance",
-    f"{distance_nmi:,.0f} nmi",
+    "Route",
+    "OpenSky observed" if observed_route is not None else "Concept fallback",
     (
-        f"OpenSky observed · {len(display_route.waypoints)} points"
+        f"{distance_nmi:,.0f} nmi · {len(display_route.waypoints)} observed points"
         if observed_route is not None
-        else f"{distance_km:,.0f} km · conceptual"
+        else f"{distance_nmi:,.0f} nmi · waiting for OpenSky"
     ),
     delta_color="off",
 )
 summary_columns[1].metric(
-    "Weather segments",
-    f"{len(demo.route.segments)}",
-    "Variable length · atmosphere-defined",
+    "Atmosphere",
+    "MOCK feed" if mock_mode else "Synthetic",
+    f"{len(demo.route.segments)} regimes · 1 hPa pressure tolerance",
     delta_color="off",
 )
 summary_columns[2].metric(
-    "Weather input",
-    "MOCK feed" if mock_mode else "Synthetic",
-    "HRRR · GEFS · 3DEP simulated" if mock_mode else "Live NOAA not connected",
-    delta_color="off",
-)
-summary_columns[3].metric(
-    "Boom output",
-    "MOCK only" if mock_mode else "Not modeled",
-    "No ground overpressure",
+    "Sonic boom",
+    "Not calculated",
+    "No footprint or ground overpressure",
     delta_color="off",
 )
 
@@ -428,16 +431,25 @@ def render_workspace() -> None:
         drag_index = active_segment_index(demo.route, drag_progress)
         drag_row = rows[drag_index]
         aircraft = aircraft_view(display_route, drag_progress, map_longitude)
+        flight_state = mock_flight_state(
+            drag_progress,
+            cruise_mach=float(drag_row["mach"]),
+            cruise_altitude_ft=float(drag_row["altitude_ft"]),
+        )
+        flight_phase = str(flight_state["phase"])
+        flight_mach = float(flight_state["mach"])
+        flight_altitude_ft = float(flight_state["altitude_ft"])
+        flight_is_supersonic = bool(flight_state["supersonic"])
         drag_weather = atmosphere_metrics(
             demo.segment_atmospheres[drag_index],
-            demo.result.segment_limits[drag_index].selected_altitude_m or 0.0,
+            flight_altitude_ft / METERS_TO_FEET,
             float(drag_row["bearing_deg"]),
         )
         if mock_mode:
             drag_weather = mock_live_metrics(drag_weather, mission_id, drag_progress)
 
         st.markdown(
-            '<div class="section-kicker">Flight-level atmosphere · updates with aircraft position</div>',
+            '<div class="section-kicker">Aircraft atmosphere · follows phase and position</div>',
             unsafe_allow_html=True,
         )
         live_weather_columns = st.columns(4)
@@ -456,15 +468,15 @@ def render_workspace() -> None:
 
         title_left, title_right = st.columns([3, 1])
         with title_left:
-            st.subheader("Route corridor")
-            st.caption("Modeled operational envelope · not legal airspace approval")
+            st.subheader("Atmospheric corridor")
+            st.caption("Blue = lower ambient pressure · red = higher ambient pressure")
         with title_right:
             st.markdown(
-                '<div style="text-align:right"><span class="eligible">SYNTHETIC ELIGIBLE</span></div>',
+                '<div style="text-align:right"><span class="eligible">AMBIENT PRESSURE</span></div>',
                 unsafe_allow_html=True,
             )
         st.markdown(
-            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Geometry <b>{"OpenSky observed" if observed_route is not None else "Concept geodesic"}</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Mock SST</b></span><span>Atmosphere <b>{"MOCK HRRR / GEFS" if mock_mode else "Synthetic"}</b></span><span>Terrain <b>{"MOCK 3DEP" if mock_mode else "Flat"}</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
+            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Geometry <b>{"OpenSky observed" if observed_route is not None else "Concept fallback"}</b></span><span>Pressure <b>{pressure_min_hpa:.1f}–{pressure_max_hpa:.1f} hPa at cruise</b></span><span>Boom <b>not modeled</b></span></div>',
             unsafe_allow_html=True,
         )
 
@@ -519,7 +531,7 @@ def render_workspace() -> None:
                     bearing=0,
                 ),
                 tooltip={
-                    "html": "<b>{segment}</b><br/>Mach {mach}<br/>{altitude_ft} ft<br/>{decision}",
+                    "html": "<b>{segment}</b><br/>Ambient pressure {pressure_label} hPa<br/>{boundary_reason}",
                     "style": {"backgroundColor": "#0b1420", "color": "#e5eef8"},
                 },
             ),
@@ -528,9 +540,9 @@ def render_workspace() -> None:
         legend_left, legend_right = st.columns([2, 1])
         with legend_left:
             st.caption(
-                "Yellow centerline: observed OpenSky track · colored sections: synthetic weather regimes"
+                f"Blue {pressure_scale_min_hpa:.1f} hPa → red {pressure_scale_max_hpa:.1f} hPa · ambient pressure scale, not boom overpressure"
                 if observed_route is not None
-                else "Colored sections: internally uniform synthetic weather regimes"
+                else f"Blue {pressure_scale_min_hpa:.1f} hPa → red {pressure_scale_max_hpa:.1f} hPa · concept route until OpenSky loads"
             )
         with legend_right:
             st.caption(f"{drag_progress:.0%} complete · {drag_row['segment']}")
@@ -538,11 +550,7 @@ def render_workspace() -> None:
     with inspector:
         st.markdown('<div class="section-kicker">Live inspector</div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="status-card"><div class="label">Aircraft position</div><div class="value">{drag_progress:.0%} · {drag_row["segment"]}</div><div class="meta">{aircraft["latitude"]:.2f}°, {aircraft["longitude"]:.2f}° · track {aircraft["bearing_deg"]:.0f}°</div></div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div class="status-card"><div class="label">Recommendation</div><div class="value">Mach {drag_row["mach"]:.2f}</div><div class="meta">{drag_row["altitude_ft"]:,} ft · scenario target unvalidated</div></div>',
+            f'<div class="status-card"><div class="label">Mock flight phase</div><div class="value">{flight_phase}</div><div class="meta">Mach {flight_mach:.2f} · {flight_altitude_ft:,.0f} ft · phase-aware fixture</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
@@ -550,7 +558,7 @@ def render_workspace() -> None:
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="status-card"><div class="label">Why this segment starts</div><div class="value" style="font-size:.92rem">{drag_row["boundary_reason"]}</div><div class="meta">{drag_row["weather_samples"]} atmosphere samples grouped</div></div>',
+            f'<div class="status-card"><div class="label">Mock MCO corridor</div><div class="value">{"ACTIVE" if flight_is_supersonic else "INACTIVE"}</div><div class="meta">{"Synthetic limit Mach " + format(drag_row["mach"], ".2f") if flight_is_supersonic else "No Mach-cutoff decision below Mach 1"}</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
@@ -558,7 +566,7 @@ def render_workspace() -> None:
             unsafe_allow_html=True,
         )
         st.caption(
-            f"{drag_row['accepted_candidates']} of {drag_row['total_candidates']} grid candidates accepted by the mock boundary."
+            f"{drag_progress:.0%} · {aircraft['latitude']:.2f}°, {aircraft['longitude']:.2f}° · track {aircraft['bearing_deg']:.0f}°"
         )
 
 

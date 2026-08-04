@@ -11,7 +11,7 @@ from typing import Any
 
 import requests
 
-from open_mco.models import Route, RouteSourceMetadata
+from open_mco.models import Route, RouteObservation, RouteSourceMetadata
 
 from .geometry import route_from_waypoints
 from .missions import Airport
@@ -92,7 +92,14 @@ class OpenSkyTrackProvider:
         )
         if not isinstance(track, dict):
             raise ValueError(f"OpenSky returned no track for aircraft {icao24}")
-        waypoints = self._track_waypoints(track)
+        observations = self._track_observations(track)
+        waypoints: list[tuple[float, float]] = []
+        for point in observations:
+            coordinates = (point.latitude, point.longitude)
+            if not waypoints or coordinates != waypoints[-1]:
+                waypoints.append(coordinates)
+        if len(waypoints) < 2:
+            raise ValueError("OpenSky track contains fewer than two distinct positions")
         checksum_payload = json.dumps(
             {"flight": flight, "track": track}, sort_keys=True, separators=(",", ":")
         ).encode()
@@ -113,6 +120,7 @@ class OpenSkyTrackProvider:
             waypoints,
             spacing_m=spacing_m,
             name=f"OpenSky observed {origin.iata} → {destination.iata} · {callsign or icao24}",
+            observations=tuple(observations),
             source=RouteSourceMetadata(
                 provider=self.name,
                 data_kind="observed_track",
@@ -125,7 +133,7 @@ class OpenSkyTrackProvider:
                 destination_icao=destination.icao,
                 observed_start=observed_start,
                 observed_end=observed_end,
-                point_count=len(waypoints),
+                point_count=len(observations),
                 checksum=checksum,
                 limitations=(
                     "OpenSky tracks are experimental, downsampled, and may have reception gaps.",
@@ -240,15 +248,16 @@ class OpenSkyTrackProvider:
         return max(candidates, key=lambda value: int(value["firstSeen"]))
 
     @staticmethod
-    def _track_waypoints(payload: dict[str, Any]) -> list[tuple[float, float]]:
+    def _track_observations(payload: dict[str, Any]) -> list[RouteObservation]:
         path = payload.get("path")
         if not isinstance(path, list):
             raise ValueError("OpenSky track response has no waypoint path")
-        waypoints: list[tuple[float, float]] = []
+        observations: list[RouteObservation] = []
         for raw_point in path:
-            if not isinstance(raw_point, list) or len(raw_point) < 6 or raw_point[5] is True:
+            if not isinstance(raw_point, list) or len(raw_point) < 6:
                 continue
             try:
+                timestamp = int(raw_point[0])
                 latitude = float(raw_point[1])
                 longitude = float(raw_point[2])
             except (TypeError, ValueError):
@@ -257,11 +266,29 @@ class OpenSkyTrackProvider:
                 continue
             if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
                 continue
-            point = (latitude, longitude)
-            if not waypoints or point != waypoints[-1]:
-                waypoints.append(point)
-        if len(waypoints) < 2:
-            raise ValueError("OpenSky track contains fewer than two usable airborne waypoints")
-        if len(waypoints) > 2_000:
+            altitude = OpenSkyTrackProvider._optional_finite_float(raw_point[3])
+            true_track = OpenSkyTrackProvider._optional_finite_float(raw_point[4])
+            if true_track is not None:
+                true_track %= 360
+            observation = RouteObservation(
+                timestamp=datetime.fromtimestamp(timestamp, tz=UTC),
+                latitude=latitude,
+                longitude=longitude,
+                barometric_altitude_m=altitude,
+                true_track_deg=true_track,
+                on_ground=bool(raw_point[5]),
+            )
+            observations.append(observation)
+        if len(observations) < 2:
+            raise ValueError("OpenSky track contains fewer than two usable trajectory points")
+        if len(observations) > 2_000:
             raise ValueError("OpenSky track exceeds the 2,000-waypoint safety limit")
-        return waypoints
+        return observations
+
+    @staticmethod
+    def _optional_finite_float(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None

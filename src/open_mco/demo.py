@@ -124,6 +124,7 @@ def build_demo_scenario(
             spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M,
             name=route_override.name,
             source=route_override.source,
+            observations=route_override.observations,
         )
     route, weather_regimes = segment_route_by_weather(
         sampled_route,

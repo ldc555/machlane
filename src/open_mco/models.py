@@ -180,11 +180,23 @@ class RouteSourceMetadata(FrozenModel):
     limitations: tuple[str, ...] = ()
 
 
+class RouteObservation(FrozenModel):
+    """One timestamped point retained from an observed trajectory source."""
+
+    timestamp: datetime
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    barometric_altitude_m: float | None = None
+    true_track_deg: float | None = Field(default=None, ge=0, lt=360)
+    on_ground: bool
+
+
 class Route(FrozenModel):
     name: str
     waypoints: tuple[tuple[float, float], ...]
     segments: tuple[RouteSegment, ...]
     source: RouteSourceMetadata | None = None
+    observations: tuple[RouteObservation, ...] = ()
 
 
 class NearFieldSourceMetadata(FrozenModel):

@@ -7,7 +7,13 @@ from typing import Any
 
 from pyproj import Geod
 
-from open_mco.models import Route, RouteSegment, RouteSourceMetadata, SegmentLimit
+from open_mco.models import (
+    Route,
+    RouteObservation,
+    RouteSegment,
+    RouteSourceMetadata,
+    SegmentLimit,
+)
 
 _GEOD = Geod(ellps="WGS84")
 
@@ -18,6 +24,7 @@ def route_from_waypoints(
     spacing_m: float,
     name: str = "route",
     source: RouteSourceMetadata | None = None,
+    observations: tuple[RouteObservation, ...] = (),
 ) -> Route:
     """Split ordered WGS84 latitude/longitude waypoints at approximately equal spacing."""
 
@@ -53,7 +60,13 @@ def route_from_waypoints(
                     bearing_deg=seg_bearing % 360,
                 )
             )
-    return Route(name=name, waypoints=tuple(waypoints), segments=tuple(segments), source=source)
+    return Route(
+        name=name,
+        waypoints=tuple(waypoints),
+        segments=tuple(segments),
+        source=source,
+        observations=observations,
+    )
 
 
 def interpolate_position(route: Route, progress: float) -> tuple[float, float]:

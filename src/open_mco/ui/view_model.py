@@ -17,6 +17,81 @@ METERS_TO_NAUTICAL_MILES = 1 / 1852
 METERS_PER_SECOND_TO_KNOTS = 1.943844492
 
 
+def pressure_color(value_hpa: float, minimum_hpa: float, maximum_hpa: float) -> list[int]:
+    """Map flight-level ambient pressure to a readable blue-white-red scale."""
+
+    if maximum_hpa <= minimum_hpa:
+        return [148, 163, 184, 220]
+    fraction = min(1.0, max(0.0, (value_hpa - minimum_hpa) / (maximum_hpa - minimum_hpa)))
+    if fraction <= 0.5:
+        blend = fraction * 2
+        start, end = (37, 99, 235), (226, 232, 240)
+    else:
+        blend = (fraction - 0.5) * 2
+        start, end = (226, 232, 240), (220, 38, 38)
+    return [
+        round(left + (right - left) * blend)
+        for left, right in zip(start, end, strict=True)
+    ] + [225]
+
+
+def mock_flight_state(
+    progress: float, *, cruise_mach: float, cruise_altitude_ft: float
+) -> dict[str, float | str | bool]:
+    """Return a phase-aware synthetic SST state without supersonic takeoff or landing.
+
+    This is a UI fixture, not an aircraft-performance model. It gives the mock feed physically
+    sensible phase ordering while the reviewed SST climb, acceleration, and descent schedule is
+    still unavailable.
+    """
+
+    bounded = min(1.0, max(0.0, progress))
+
+    def interpolate(start: float, end: float, fraction: float) -> float:
+        return start + (end - start) * min(1.0, max(0.0, fraction))
+
+    if bounded < 0.06:
+        local = bounded / 0.06
+        phase = "Takeoff / initial climb"
+        mach = interpolate(0.20, 0.45, local)
+        altitude_ft = interpolate(0, 10_000, local)
+    elif bounded < 0.16:
+        local = (bounded - 0.06) / 0.10
+        phase = "Climb"
+        mach = interpolate(0.45, 0.78, local)
+        altitude_ft = interpolate(10_000, 45_000, local)
+    elif bounded < 0.22:
+        local = (bounded - 0.16) / 0.06
+        phase = "Transonic acceleration"
+        mach = interpolate(0.78, cruise_mach, local)
+        altitude_ft = interpolate(45_000, cruise_altitude_ft, local)
+    elif bounded <= 0.78:
+        phase = "Supersonic cruise"
+        mach = cruise_mach
+        altitude_ft = cruise_altitude_ft
+    elif bounded <= 0.84:
+        local = (bounded - 0.78) / 0.06
+        phase = "Supersonic deceleration"
+        mach = interpolate(cruise_mach, 0.78, local)
+        altitude_ft = interpolate(cruise_altitude_ft, 45_000, local)
+    elif bounded <= 0.94:
+        local = (bounded - 0.84) / 0.10
+        phase = "Descent"
+        mach = interpolate(0.78, 0.45, local)
+        altitude_ft = interpolate(45_000, 10_000, local)
+    else:
+        local = (bounded - 0.94) / 0.06
+        phase = "Approach / landing"
+        mach = interpolate(0.45, 0.20, local)
+        altitude_ft = interpolate(10_000, 0, local)
+    return {
+        "phase": phase,
+        "mach": mach,
+        "altitude_ft": altitude_ft,
+        "supersonic": mach >= 1.0,
+    }
+
+
 def display_longitude(longitude: float, reference: float) -> float:
     """Keep a displayed longitude within one half-world of a local reference."""
 

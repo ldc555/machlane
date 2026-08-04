@@ -10,9 +10,44 @@ from open_mco.ui.view_model import (
     atmosphere_metrics,
     corridor_rows,
     display_longitude,
+    mock_flight_state,
     mock_live_metrics,
+    pressure_color,
     segment_rows,
 )
+
+
+def test_pressure_color_is_blue_low_and_red_high() -> None:
+    low = pressure_color(110, 110, 125)
+    middle = pressure_color(117.5, 110, 125)
+    high = pressure_color(125, 110, 125)
+
+    assert low[:3] == [37, 99, 235]
+    assert middle[:3] == [226, 232, 240]
+    assert high[:3] == [220, 38, 38]
+    assert low[3] == middle[3] == high[3] == 225
+
+
+def test_mock_flight_state_is_supersonic_only_in_cruise_corridor() -> None:
+    departure = mock_flight_state(0, cruise_mach=1.1, cruise_altitude_ft=50_000)
+    acceleration = mock_flight_state(0.18, cruise_mach=1.1, cruise_altitude_ft=50_000)
+    cruise = mock_flight_state(0.5, cruise_mach=1.1, cruise_altitude_ft=50_000)
+    arrival = mock_flight_state(1, cruise_mach=1.1, cruise_altitude_ft=50_000)
+
+    assert departure == {
+        "phase": "Takeoff / initial climb",
+        "mach": 0.2,
+        "altitude_ft": 0.0,
+        "supersonic": False,
+    }
+    assert float(acceleration["mach"]) < 1
+    assert cruise["phase"] == "Supersonic cruise"
+    assert cruise["mach"] == 1.1
+    assert cruise["supersonic"] is True
+    assert arrival["phase"] == "Approach / landing"
+    assert arrival["mach"] == pytest.approx(0.2)
+    assert arrival["altitude_ft"] == pytest.approx(0)
+    assert arrival["supersonic"] is False
 
 
 def test_ui_state_is_consistent_and_honestly_labeled() -> None:

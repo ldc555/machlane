@@ -104,9 +104,10 @@ def test_opensky_adapter_imports_latest_matching_observed_track(monkeypatch) -> 
                     "callsign": "TEST42 ",
                     "startTime": 1_754_265_600,
                     "endTime": 1_754_294_400,
-                    "path": [
-                        [1_754_265_600, 32.90, -97.04, 0, 0, True],
-                        [1_754_266_000, 33.10, -96.70, 5_000, 65, False],
+                        "path": [
+                            [1_754_265_600, 32.90, -97.04, 0, 0, True],
+                            [1_754_265_700, 32.90, -97.04, 100, 0, False],
+                            [1_754_266_000, 33.10, -96.70, 5_000, 65, False],
                         [1_754_270_000, 36.50, -88.00, 11_000, 70, False],
                         [1_754_294_000, 40.60, -73.80, 2_000, 75, False],
                     ],
@@ -128,13 +129,23 @@ def test_opensky_adapter_imports_latest_matching_observed_track(monkeypatch) -> 
         end=datetime(2026, 8, 4, tzinfo=UTC),
     )
 
-    assert route.waypoints == ((33.1, -96.7), (36.5, -88.0), (40.6, -73.8))
+    assert route.waypoints == (
+        (32.9, -97.04),
+        (33.1, -96.7),
+        (36.5, -88.0),
+        (40.6, -73.8),
+    )
     assert route.source is not None
     assert route.source.data_kind == "observed_track"
     assert route.source.callsign == "TEST42"
     assert route.source.flight_id == "def456:1754265600"
-    assert route.source.point_count == 3
+    assert route.source.point_count == 5
     assert route.source.checksum
+    assert len(route.observations) == 5
+    assert route.observations[0].on_ground is True
+    assert route.observations[1].on_ground is False
+    assert route.observations[2].barometric_altitude_m == 5_000
+    assert route.observations[-1].true_track_deg == 75
     assert len(session.get_calls) == 2
 
 
