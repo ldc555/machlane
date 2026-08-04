@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from math import isclose, isfinite
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -103,6 +104,14 @@ class AtmosphericProfile(FrozenModel):
             raise ValueError("atmospheric arrays must be non-empty and have equal lengths")
         if any(b <= a for a, b in zip(self.altitude_m, self.altitude_m[1:], strict=False)):
             raise ValueError("altitude levels must be strictly increasing")
+        if any(value <= 0 or not isfinite(value) for value in self.temperature_k):
+            raise ValueError("atmospheric temperatures must be finite and positive")
+        if any(value <= 0 or not isfinite(value) for value in self.pressure_pa):
+            raise ValueError("atmospheric pressures must be finite and positive")
+        if self.humidity_fraction is not None and any(
+            value < 0 or value > 1 or not isfinite(value) for value in self.humidity_fraction
+        ):
+            raise ValueError("relative humidity must be finite and between zero and one")
         return self
 
 
@@ -156,6 +165,155 @@ class Route(FrozenModel):
     name: str
     waypoints: tuple[tuple[float, float], ...]
     segments: tuple[RouteSegment, ...]
+
+
+class NearFieldSourceMetadata(FrozenModel):
+    """Provenance for an aircraft pressure signature before atmospheric propagation."""
+
+    provider: str
+    solver_version: str | None = None
+    source_document: str
+    retrieved_at: datetime
+    checksum: str
+    configuration_checksum: str | None = None
+    label: str = "UNVALIDATED_NEAR_FIELD_SIGNATURE"
+
+
+class NearFieldSignature(FrozenModel):
+    """SI-normalized pressure perturbation sampled on one near-field cut."""
+
+    distance_m: tuple[float, ...]
+    overpressure_pa: tuple[float, ...]
+    reference_distance_m: float = Field(gt=0)
+    azimuth_deg: float = Field(ge=0, lt=360)
+    flight_mach: float = Field(gt=1)
+    flight_altitude_m: float = Field(gt=0)
+    source: NearFieldSourceMetadata
+
+    @model_validator(mode="after")
+    def validate_waveform(self) -> NearFieldSignature:
+        if len(self.distance_m) != len(self.overpressure_pa) or len(self.distance_m) < 3:
+            raise ValueError("near-field arrays must have equal lengths and at least three samples")
+        if not all(isfinite(value) for value in (*self.distance_m, *self.overpressure_pa)):
+            raise ValueError("near-field arrays must contain only finite values")
+        if any(b <= a for a, b in zip(self.distance_m, self.distance_m[1:], strict=False)):
+            raise ValueError("near-field distances must be strictly increasing")
+        return self
+
+
+class PropagationPhysicsOptions(FrozenModel):
+    """Effects a real solver must explicitly include or reject for a declared case."""
+
+    ray_families: tuple[
+        Literal["PRIMARY", "SECONDARY_DIRECT", "SECONDARY_INDIRECT"], ...
+    ] = Field(
+        default=("PRIMARY", "SECONDARY_DIRECT", "SECONDARY_INDIRECT"),
+        min_length=1,
+    )
+    include_nonlinearity: bool = True
+    include_thermoviscous_absorption: bool = True
+    include_molecular_relaxation: bool = True
+    include_wind: bool = True
+    include_geometric_spreading: bool = True
+    include_terrain_intersection: bool = True
+    include_ground_reflection: bool = True
+    earth_model: Literal["WGS84", "FLAT"] = "WGS84"
+
+
+class SonicBoomCase(FrozenModel):
+    """Complete normalized boundary passed to a future physical propagation engine."""
+
+    aircraft: AircraftModel
+    segment: RouteSegment
+    atmosphere: AtmosphericProfile
+    terrain: TerrainProfile
+    near_field_signature: NearFieldSignature
+    mach: float = Field(gt=1)
+    altitude_m: float = Field(gt=0)
+    boom_limit_pa: float = Field(gt=0)
+    physics: PropagationPhysicsOptions = Field(default_factory=PropagationPhysicsOptions)
+
+    @model_validator(mode="after")
+    def validate_operating_point(self) -> SonicBoomCase:
+        if abs(self.near_field_signature.flight_mach - self.mach) > 1e-6:
+            raise ValueError("near-field signature Mach does not match the propagation case")
+        if abs(self.near_field_signature.flight_altitude_m - self.altitude_m) > 1e-3:
+            raise ValueError("near-field signature altitude does not match the propagation case")
+        return self
+
+
+class GroundSignature(FrozenModel):
+    """One solver-produced ground waveform and its acoustical metrics."""
+
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    ray_family: Literal["PRIMARY", "SECONDARY_DIRECT", "SECONDARY_INDIRECT"]
+    time_s: tuple[float, ...]
+    overpressure_pa: tuple[float, ...]
+    peak_positive_overpressure_pa: float = Field(ge=0)
+    peak_negative_overpressure_pa: float = Field(le=0)
+    perceived_level_db: float | None = None
+
+    @model_validator(mode="after")
+    def validate_samples(self) -> GroundSignature:
+        if len(self.time_s) != len(self.overpressure_pa) or len(self.time_s) < 3:
+            raise ValueError("ground-signature arrays must have equal lengths and three samples")
+        if any(b <= a for a, b in zip(self.time_s, self.time_s[1:], strict=False)):
+            raise ValueError("ground-signature times must be strictly increasing")
+        if not all(isfinite(value) for value in (*self.time_s, *self.overpressure_pa)):
+            raise ValueError("ground-signature arrays must contain only finite values")
+        if not isclose(
+            self.peak_positive_overpressure_pa,
+            max(self.overpressure_pa),
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("positive peak metric does not match the ground waveform")
+        if not isclose(
+            self.peak_negative_overpressure_pa,
+            min(self.overpressure_pa),
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("negative peak metric does not match the ground waveform")
+        return self
+
+
+class SonicBoomPrediction(FrozenModel):
+    """Physical-engine result; classification remains unknown unless all requested rays ran."""
+
+    engine_name: str
+    engine_version: str
+    signatures: tuple[GroundSignature, ...]
+    requested_ray_families: tuple[
+        Literal["PRIMARY", "SECONDARY_DIRECT", "SECONDARY_INDIRECT"], ...
+    ] = Field(min_length=1)
+    boom_limit_pa: float = Field(gt=0)
+    classification: Literal["WITHIN_LIMIT", "EXCEEDS_LIMIT", "UNKNOWN"]
+    assumptions: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+    validation_status: Literal["UNVALIDATED", "COMPARISON_ONLY", "VALIDATED"] = "UNVALIDATED"
+
+    @model_validator(mode="after")
+    def validate_classification(self) -> SonicBoomPrediction:
+        completed = {signature.ray_family for signature in self.signatures}
+        requested = set(self.requested_ray_families)
+        if not requested.issubset(completed):
+            if self.classification != "UNKNOWN":
+                raise ValueError("incomplete ray-family coverage requires UNKNOWN classification")
+            return self
+        expected = (
+            "EXCEEDS_LIMIT"
+            if any(
+                signature.peak_positive_overpressure_pa > self.boom_limit_pa
+                for signature in self.signatures
+                if signature.ray_family in requested
+            )
+            else "WITHIN_LIMIT"
+        )
+        if self.classification != expected:
+            raise ValueError("classification does not match the ground-waveform peak metrics")
+        return self
 
 
 class PropagationRequest(FrozenModel):

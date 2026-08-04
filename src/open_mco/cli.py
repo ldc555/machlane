@@ -19,9 +19,10 @@ from open_mco.atmosphere import (
     HerbieHRRRProvider,
 )
 from open_mco.demo import run_demo
+from open_mco.physics import assess_boom_readiness
 from open_mco.route import route_from_waypoints
 from open_mco.terrain import USGS3DEPProvider
-from open_mco.validation import PCBoomAdapter
+from open_mco.validation import PCBoomAdapter, SU2NearFieldAdapter
 
 app = typer.Typer(help="MachLane research planning and evidence tools.", no_args_is_help=True)
 
@@ -36,6 +37,29 @@ def validate_aircraft(path: Path) -> None:
         typer.echo(f"INVALID: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"VALID: {aircraft.name.original_value}; sha256={aircraft.workbook_checksum}")
+
+
+@app.command("boom-readiness")
+def boom_readiness(
+    path: Path = typer.Argument(..., help="Aircraft workbook to audit."),
+    near_field: Path | None = typer.Option(None, help="Optional SI near-field signature CSV."),
+    output: Path | None = typer.Option(None, help="Optional JSON report path."),
+    strict: bool = typer.Option(False, help="Exit non-zero while any blocker remains."),
+) -> None:
+    """Explain every blocker before a physical sonic-boom prediction can run."""
+
+    report = assess_boom_readiness(path, near_field_path=near_field)
+    typer.echo(f"Physical prediction ready: {'YES' if report.ready_for_physical_prediction else 'NO'}")
+    for check in report.checks:
+        typer.echo(f"{check.status.value:15} {check.key}: {check.detail}")
+        if check.action:
+            typer.echo(f"{'':16}next: {check.action}")
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        typer.echo(f"Wrote machine-readable report to {output}")
+    if strict and not report.ready_for_physical_prediction:
+        raise typer.Exit(2)
 
 
 @app.command()
@@ -149,6 +173,38 @@ def export_pcboom(
     adapter = PCBoomAdapter(version=version, configuration={"source_run": run_id})
     target = adapter.export_case(manifest, Path("results") / run_id / "pcboom_staging")
     typer.echo(f"Staged normalized case at {target}; PCBoom was not bundled or invoked.")
+
+
+@app.command("stage-su2")
+def stage_su2(
+    config: Path = typer.Option(..., exists=True, help="Reviewed SU2 configuration file."),
+    mesh: Path = typer.Option(..., exists=True, help="Reviewed SU2 mesh file."),
+    version: str = typer.Option(..., help="Installed SU2 version."),
+    mach: float = typer.Option(..., min=1.0),
+    altitude_m: float = typer.Option(..., min=1.0),
+    reference_distance_m: float = typer.Option(..., min=0.001),
+    azimuth_deg: float = typer.Option(0.0, min=0.0, max=359.999),
+    output: Path = typer.Option(Path("data/staging/su2")),
+) -> None:
+    """Stage and checksum a reproducible SU2 near-field CFD case without running it."""
+
+    adapter = SU2NearFieldAdapter(version=version)
+    manifest = adapter.stage_case(
+        config_path=config,
+        mesh_path=mesh,
+        staging_directory=output,
+        operating_point={
+            "mach": mach,
+            "altitude_m": altitude_m,
+            "reference_distance_m": reference_distance_m,
+            "azimuth_deg": azimuth_deg,
+        },
+    )
+    typer.echo(f"Staged SU2 case at {manifest}")
+    if adapter.installed_executable is None:
+        typer.echo("SU2_CFD was not found on PATH; no solver was run.")
+    else:
+        typer.echo(f"Recorded SU2 executable: {adapter.installed_executable}; no solver was run.")
 
 
 @app.command()

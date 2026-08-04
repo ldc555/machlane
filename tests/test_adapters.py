@@ -45,6 +45,7 @@ def test_hrrr_adapter_extracts_and_labels_real_pressure_profile(
                 "t": Variable([220, 250, 280]),
                 "u": Variable([30, 20, 10]),
                 "v": Variable([5, 4, 3]),
+                "r": Variable([40, 50, 60]),
             }
             self.coords = {"isobaricInhPa": Variable([250, 500, 900])}
 
@@ -78,7 +79,7 @@ def test_hrrr_adapter_extracts_and_labels_real_pressure_profile(
             assert kwargs["product"] == "prs"
 
         def xarray(self, search, **kwargs):
-            assert "TMP" in search and kwargs["remove_grib"] is False
+            assert "TMP" in search and "RH" in search and kwargs["remove_grib"] is False
             return Dataset()
 
         def get_localFilePath(self, search):
@@ -90,6 +91,7 @@ def test_hrrr_adapter_extracts_and_labels_real_pressure_profile(
 
     assert profile.altitude_m == (1000.0, 5000.0, 10000.0)
     assert profile.pressure_pa == (90000.0, 50000.0, 25000.0)
+    assert profile.humidity_fraction == (0.6, 0.5, 0.4)
     assert profile.source.model_cycle == datetime(2026, 8, 3, 12, tzinfo=UTC)
     assert profile.source.forecast_hour == 2
     assert profile.source.provider == "hrrr_via_herbie"
@@ -142,6 +144,7 @@ def test_era5_adapter_retrieves_cached_pressure_profile(tmp_path: Path, monkeypa
             "t": Variable([220, 250, 280]),
             "u": Variable([30, 20, 10]),
             "v": Variable([5, 4, 3]),
+            "r": Variable([40, 50, 60]),
         }
         coords = {"pressure_level": Variable([250, 500, 900])}
 
@@ -177,6 +180,7 @@ def test_era5_adapter_retrieves_cached_pressure_profile(tmp_path: Path, monkeypa
 
     assert profile.altitude_m == pytest.approx((1000.0, 5000.0, 10000.0))
     assert profile.pressure_pa == (90000.0, 50000.0, 25000.0)
+    assert profile.humidity_fraction == (0.6, 0.5, 0.4)
     assert profile.source.provider == "era5_via_cdsapi"
     assert profile.source.checksums
 

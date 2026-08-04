@@ -176,6 +176,18 @@ The project uses packages as dependencies. **Do not fork or copy their source co
 
 PCBoom is not bundled or redistributed. Access requires a separate NASA software request and its applicable agreement. The repository contains only an adapter for exporting cases and importing user-supplied results.
 
+### Sonic-boom calculation preparation
+
+- [SU2](https://github.com/su2code/SU2) — open-source CFD candidate for producing a reviewed aircraft near-field pressure signature. MachLane stages and checksums a case; it does not silently run or validate the solver.
+- [meshio](https://github.com/nschloe/meshio) — optional mesh-format inspection, including SU2 meshes. It checks interchange structure, not aerodynamic mesh adequacy.
+- [MetPy](https://unidata.github.io/MetPy/latest/) — optional unit-aware derivation of moist-air density and water-vapor mixing ratio from normalized forecast profiles.
+
+These components prepare inputs; they do **not** replace a nonlinear atmospheric propagation solver.
+No open-source far-field engine has been accepted into the calculation path yet. The physical interface
+requires near-field pressure, three-dimensional rays, nonlinearity, absorption/relaxation, spreading,
+wind, terrain/ground interaction, primary and secondary paths, ground waveforms, and acoustical metrics.
+See [docs/SONIC_BOOM_PIPELINE.md](docs/SONIC_BOOM_PIPELINE.md).
+
 ## 8. Data sources
 
 ### Routes and distance
@@ -349,6 +361,12 @@ Install the real weather and terrain adapters only when they are needed:
 pip install -e ".[full]"
 ```
 
+Install only the optional calculation-preparation tools:
+
+```bash
+pip install -e ".[physics]"
+```
+
 Local GeoTIFF/raster workflows are deliberately separate from live 3DEP access:
 
 ```bash
@@ -359,6 +377,21 @@ pip install -e ".[gis]"
 
 ```bash
 open-mco validate-aircraft aircraft_database/NASA_STCA_55T/NASA_STCA_55T_Aircraft.xlsx
+```
+
+Audit the full physical-calculation path without making any network or solver call:
+
+```bash
+open-mco boom-readiness aircraft_database/NASA_STCA_55T/NASA_STCA_55T_Aircraft.xlsx
+```
+
+Stage a reviewed SU2 configuration and mesh for an explicit expert-run CFD case:
+
+```bash
+open-mco stage-su2 \
+  --config path/to/case.cfg --mesh path/to/mesh.su2 --version 8.5.0 \
+  --mach 1.4 --altitude-m 15000 --reference-distance-m 100 \
+  --output data/staging/su2
 ```
 
 ### Run the synthetic vertical slice
@@ -469,6 +502,8 @@ paths remain synthetic and network-free so contributors can run the full reposit
 
 ```text
 open-mco validate-aircraft PATH
+open-mco boom-readiness PATH [--near-field SIGNATURE.csv]
+open-mco stage-su2 --config CASE.cfg --mesh MESH.su2 ...
 open-mco demo
 open-mco plan --config configs/baseline.yml
 open-mco fetch-weather --provider hrrr|gefs|era5 ...
@@ -537,6 +572,11 @@ Development requires documented and reviewed implementation of:
 - model limitations.
 
 No equation may be invented by an automated coding agent. Physics changes require a cited source, test case, and reviewer.
+
+The separate `SonicBoomPropagationEngine` protocol is the fail-closed physical boundary. Unlike the
+legacy synthetic planner fixture, it accepts a complete `SonicBoomCase` containing the aircraft,
+operating point, near-field pressure signature, atmospheric column, terrain, boom limit, and an
+explicit list of physical effects. It must return receiver waveforms and ground metrics, not a score.
 
 ### PCBoomAdapter
 

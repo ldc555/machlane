@@ -8,7 +8,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from open_mco.atmosphere import project_wind_onto_bearing
-from open_mco.models import PropagationRequest, PropagationResult
+from open_mco.models import (
+    PropagationRequest,
+    PropagationResult,
+    SonicBoomCase,
+    SonicBoomPrediction,
+)
 
 
 class BoomPropagationEngine(Protocol):
@@ -17,6 +22,17 @@ class BoomPropagationEngine(Protocol):
 
     def evaluate(self, request: PropagationRequest) -> PropagationResult:
         """Classify one normalized candidate without making a regulatory determination."""
+        ...
+
+
+class SonicBoomPropagationEngine(Protocol):
+    """Boundary for a physical engine; the synthetic planner engine does not satisfy it."""
+
+    name: str
+    version: str
+
+    def predict(self, case: SonicBoomCase) -> SonicBoomPrediction:
+        """Propagate a near-field signature and return ground waveforms and metrics."""
         ...
 
 
@@ -85,3 +101,8 @@ class FastMCOEngine:
 
     def evaluate(self, request: PropagationRequest) -> PropagationResult:
         raise NotImplementedError("FastMCOEngine physics is not implemented or validated")
+
+    def predict(self, case: SonicBoomCase) -> SonicBoomPrediction:
+        raise NotImplementedError(
+            "physical near-field-to-ground propagation is not implemented or validated"
+        )

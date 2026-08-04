@@ -10,6 +10,7 @@ dependencies:
   - openpyxl
   - pydantic>=2
   - pint
+  - metpy>=1.7
   - xarray
   - cdsapi
   - cfgrib
@@ -27,6 +28,7 @@ dependencies:
   - plotly
   - jinja2
   - pyarrow
+  - meshio>=5.3
   - pytest
   - pytest-cov
   - hypothesis

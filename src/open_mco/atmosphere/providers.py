@@ -87,7 +87,7 @@ class _HerbiePressureProvider:
     name = "network"
     model = ""
     product = ""
-    search = r":(?:HGT|TMP|UGRD|VGRD):[0-9]+ mb:"
+    search = r":(?:HGT|TMP|UGRD|VGRD|RH):[0-9]+ mb:"
 
     def __init__(
         self,
@@ -194,8 +194,23 @@ class _HerbiePressureProvider:
         temperature = np.asarray(self._variable(point, "t", "tmp").values, dtype=float).reshape(-1)
         zonal = np.asarray(self._variable(point, "u", "ugrd").values, dtype=float).reshape(-1)
         meridional = np.asarray(self._variable(point, "v", "vgrd").values, dtype=float).reshape(-1)
+        humidity = np.asarray(self._variable(point, "r", "rh").values, dtype=float).reshape(-1)
+        if np.nanmax(humidity) > 1:
+            humidity[:] = humidity / 100
         pressure = self._pressure(point).reshape(-1)
-        if len({len(altitude), len(temperature), len(zonal), len(meridional), len(pressure)}) != 1:
+        if (
+            len(
+                {
+                    len(altitude),
+                    len(temperature),
+                    len(zonal),
+                    len(meridional),
+                    len(humidity),
+                    len(pressure),
+                }
+            )
+            != 1
+        ):
             raise ValueError("weather pressure-level arrays do not align")
         order = np.argsort(altitude)
         if self._herbie is None:
@@ -210,6 +225,7 @@ class _HerbiePressureProvider:
             pressure_pa=tuple(float(value) for value in pressure[order]),
             zonal_wind_mps=tuple(float(value) for value in zonal[order]),
             meridional_wind_mps=tuple(float(value) for value in meridional[order]),
+            humidity_fraction=tuple(float(value) for value in humidity[order]),
             latitude=latitude,
             longitude=longitude,
             valid_time=valid_time.astimezone(UTC),
@@ -219,7 +235,13 @@ class _HerbiePressureProvider:
                 forecast_hour=self.forecast_hour,
                 ensemble_member=resolved_member,
                 valid_time=valid_time.astimezone(UTC),
-                variables=("geopotential_height", "temperature", "u_wind", "v_wind"),
+                variables=(
+                    "geopotential_height",
+                    "temperature",
+                    "u_wind",
+                    "v_wind",
+                    "relative_humidity",
+                ),
                 horizontal_interpolation="nearest model grid point via herbie.pick_points",
                 vertical_interpolation="native pressure levels; no interpolation",
                 retrieved_at=datetime.now(UTC),
@@ -327,6 +349,7 @@ class ERA5Provider:
                 "temperature",
                 "u_component_of_wind",
                 "v_component_of_wind",
+                "relative_humidity",
             ],
             "pressure_level": [str(level) for level in self.pressure_levels_hpa],
             "year": [f"{valid_utc.year:04d}"],
@@ -377,6 +400,12 @@ class ERA5Provider:
                     _HerbiePressureProvider._variable(point, "v", "v_component_of_wind").values,
                     dtype=float,
                 ).reshape(-1)
+                humidity = np.asarray(
+                    _HerbiePressureProvider._variable(point, "r", "relative_humidity").values,
+                    dtype=float,
+                ).reshape(-1)
+                if np.nanmax(humidity) > 1:
+                    humidity[:] = humidity / 100
                 pressure = _HerbiePressureProvider._pressure(point).reshape(-1)
             finally:
                 close = getattr(dataset, "close", None)
@@ -387,7 +416,19 @@ class ERA5Provider:
                 "ERA5 file does not contain one aligned pressure-level column"
             ) from exc
         altitude = geopotential / 9.80665
-        if len({len(altitude), len(temperature), len(zonal), len(meridional), len(pressure)}) != 1:
+        if (
+            len(
+                {
+                    len(altitude),
+                    len(temperature),
+                    len(zonal),
+                    len(meridional),
+                    len(humidity),
+                    len(pressure),
+                }
+            )
+            != 1
+        ):
             raise ValueError("ERA5 pressure-level arrays do not align")
         order = np.argsort(altitude)
         return AtmosphericProfile(
@@ -396,13 +437,20 @@ class ERA5Provider:
             pressure_pa=tuple(float(value) for value in pressure[order]),
             zonal_wind_mps=tuple(float(value) for value in zonal[order]),
             meridional_wind_mps=tuple(float(value) for value in meridional[order]),
+            humidity_fraction=tuple(float(value) for value in humidity[order]),
             latitude=latitude,
             longitude=longitude,
             valid_time=valid_utc,
             source=AtmosphericSourceMetadata(
                 provider="era5_via_cdsapi",
                 valid_time=valid_utc,
-                variables=("geopotential", "temperature", "u_wind", "v_wind"),
+                variables=(
+                    "geopotential",
+                    "temperature",
+                    "u_wind",
+                    "v_wind",
+                    "relative_humidity",
+                ),
                 horizontal_interpolation="nearest ERA5 0.25-degree grid point",
                 vertical_interpolation="native pressure levels; no interpolation",
                 retrieved_at=datetime.now(UTC),
