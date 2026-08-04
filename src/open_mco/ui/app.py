@@ -43,14 +43,15 @@ PLANE_ICON_MAPPING = {
     "plane": {
         "x": 0,
         "y": 0,
-        "width": 64,
-        "height": 64,
-        "anchorX": 32,
-        "anchorY": 32,
+        "width": 256,
+        "height": 256,
+        "anchorX": 128,
+        "anchorY": 128,
         "mask": False,
     }
 }
 PLANE_ICON_ATLAS = str(Path(__file__).with_name("static") / "plane.png")
+PLANE_ARTWORK_HEADING_OFFSET_DEG = 45
 
 # Streamlit renamed ``experimental_fragment`` to ``fragment`` in 1.37. Prefer the stable name, fall
 # back to the experimental one, and degrade to a no-op decorator on older pins (the page simply
@@ -512,12 +513,12 @@ def render_workspace() -> None:
                 icon_atlas=PLANE_ICON_ATLAS,
                 icon_mapping=PLANE_ICON_MAPPING,
                 get_icon="icon",
-                get_size=48,
+                get_size=56,
                 get_color=[255, 255, 255, 255],
                 size_scale=1,
-                size_min_pixels=48,
-                size_max_pixels=48,
-                get_angle=aircraft["bearing_deg"],
+                size_min_pixels=56,
+                size_max_pixels=56,
+                get_angle=aircraft["bearing_deg"] - PLANE_ARTWORK_HEADING_OFFSET_DEG,
             ),
         ]
         st.pydeck_chart(
