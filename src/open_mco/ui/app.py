@@ -105,7 +105,7 @@ h1,h2,h3 { letter-spacing:-.02em; }
 .status-card .label { color:#b8c9da; font-size:.68rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; }
 .status-card .value { color:#e7f8f5; font-size:1.15rem; font-weight:750; margin:.15rem 0; }
 .status-card .meta { color:#b3c4d5; font-size:.74rem; }
-.calc-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:.55rem; margin:.4rem 0 .8rem; }
+.calc-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:.55rem; margin:.4rem 0 .8rem; }
 .calc-step { border:1px solid var(--line); background:#0d1722; border-radius:.65rem; padding:.75rem; min-height:7rem; }
 .calc-step .number { color:var(--teal); font:700 .68rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.1em; }
 .calc-step b { display:block; color:#e5eef8; margin:.45rem 0 .25rem; font-size:.85rem; }
@@ -268,6 +268,13 @@ if not isinstance(observed_route_json, str):
 
 demo = scenario(mission_id, SCENARIO_CACHE_SCHEMA, observed_route_json)
 observed_route = Route.model_validate_json(observed_route_json)
+if (
+    observed_route.source is None
+    or observed_route.source.provider != "opensky"
+    or observed_route.source.data_kind != "observed_track"
+):
+    st.error("Route provenance is not a normalized OpenSky observation; planning is stopped.")
+    st.stop()
 display_route = observed_route
 rows = segment_rows(demo.route, demo.result)
 regime_by_id = {regime.segment_id: regime for regime in demo.weather_regimes}
@@ -306,6 +313,17 @@ observed_day = (
     observed_source.observed_start.strftime("%Y-%m-%d")
     if observed_source and observed_source.observed_start
     else str(observed_date)
+)
+observed_window = "Time window unavailable"
+if observed_source and observed_source.observed_start and observed_source.observed_end:
+    observed_window = (
+        f"{observed_source.observed_start.strftime('%Y-%m-%d %H:%M')}–"
+        f"{observed_source.observed_end.strftime('%H:%M')} UTC"
+    )
+source_point_count = (
+    observed_source.point_count
+    if observed_source and observed_source.point_count is not None
+    else len(observed_route.waypoints)
 )
 st.caption(
     f"Observed OpenSky trajectory · {callsign} · {observed_day} · "
@@ -734,13 +752,18 @@ with model_tab:
     st.markdown(
         """
 <div class="calc-grid">
-  <div class="calc-step"><span class="number">01</span><b>Sample atmosphere</b><span>Pressure, temperature, and wind are sampled along the WGS-84 flight path.</span></div>
-  <div class="calc-step"><span class="number">02</span><b>Form weather regimes</b><span>Adjacent samples remain together until a characteristic crosses its threshold.</span></div>
-  <div class="calc-step"><span class="number">03</span><b>Plan each segment</b><span>Mach and altitude candidates are evaluated separately inside every weather regime.</span></div>
-  <div class="calc-step"><span class="number">04</span><b>Propagate rays</b><span>Not implemented: effective sound speed, ray paths, footprint, and ground overpressure.</span></div>
+  <div class="calc-step"><span class="number">01</span><b>Load observed track</b><span>OpenSky departure and track responses are normalized with timestamps, coordinates, checksum, and limitations. No route fallback.</span></div>
+  <div class="calc-step"><span class="number">02</span><b>Sample atmosphere</b><span>Pressure, temperature, and wind are sampled along the retained OpenSky polyline.</span></div>
+  <div class="calc-step"><span class="number">03</span><b>Form weather regimes</b><span>Adjacent samples remain together until a characteristic crosses its threshold; every bend stays attached to the observed track.</span></div>
+  <div class="calc-step"><span class="number">04</span><b>Plan each segment</b><span>Mach and altitude candidates are evaluated separately inside every weather regime.</span></div>
+  <div class="calc-step"><span class="number">05</span><b>Propagate rays</b><span>Not implemented: effective sound speed, ray paths, footprint, and ground overpressure.</span></div>
 </div>
 """,
         unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Route input · OpenSky observed track · {callsign} · {observed_window} · "
+        f"{source_point_count:,} source points. OpenSky supplies route geometry, not weather."
     )
     equation_left, equation_right = st.columns([1.35, 1])
     with equation_left:
@@ -762,6 +785,11 @@ with model_tab:
         st.dataframe(
             pd.DataFrame(
                 [
+                    {"Variable": "Route source", "Value": f"OpenSky · {callsign}"},
+                    {
+                        "Variable": "Observed track",
+                        "Value": f"{source_point_count:,} points · {observed_window}",
+                    },
                     {"Variable": "Candidate Mach", "Value": f"{active['mach']:.2f}"},
                     {"Variable": "Altitude", "Value": f"{active['altitude_ft']:,} ft"},
                     {"Variable": "Along-track wind", "Value": f"{active['along_wind_kt']:+.1f} kt"},
@@ -777,10 +805,54 @@ with model_tab:
     )
 
 with evidence_tab:
+    st.markdown("#### Observed route evidence")
+    route_checksum = (
+        observed_source.checksum if observed_source and observed_source.checksum else "Unavailable"
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"Field": "Provider", "Value": "OpenSky Network REST API"},
+                {
+                    "Field": "Airport pair",
+                    "Value": f"{mission.origin.icao} → {mission.destination.icao}",
+                },
+                {"Field": "Callsign", "Value": callsign},
+                {
+                    "Field": "Flight ID",
+                    "Value": observed_source.flight_id or "Unavailable",
+                },
+                {"Field": "Observed UTC", "Value": observed_window},
+                {"Field": "Source observations", "Value": f"{source_point_count:,}"},
+                {
+                    "Field": "Normalized route points",
+                    "Value": f"{len(observed_route.waypoints):,}",
+                },
+                {"Field": "Payload checksum", "Value": route_checksum},
+                {
+                    "Field": "Geometry policy",
+                    "Value": "Full observed polyline retained; 1-mile atmospheric band",
+                },
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    if observed_source.source_url:
+        st.link_button("Open OpenSky source request", observed_source.source_url)
+    with st.expander("OpenSky limitations"):
+        for limitation in observed_source.limitations:
+            st.markdown(f"- {limitation}")
+
     st.markdown("#### Data readiness")
     st.dataframe(
         pd.DataFrame(
             [
+                {
+                    "Source": "OpenSky",
+                    "State": "OBSERVED · LOADED",
+                    "Use": f"Route geometry · {callsign} · {source_point_count:,} points",
+                },
                 {
                     "Source": "NOAA HRRR",
                     "State": mission.hrrr_coverage,
@@ -821,6 +893,7 @@ with evidence_tab:
         st.dataframe(statuses, hide_index=True, width="stretch")
     with evidence_right:
         st.markdown("#### Traceability")
+        st.caption(f"Route · OpenSky · {callsign} · {observed_window}")
         st.caption(f"Engine · {demo.result.engine_name} {demo.result.engine_version}")
         st.caption(f"Atmosphere · {demo.atmosphere.source.provider}")
         st.caption(f"Terrain · {demo.terrain.source.provider}")
@@ -836,6 +909,7 @@ with evidence_tab:
                         "airport_source": AIRPORT_SOURCE_URL,
                         "airport_source_retrieved": AIRPORT_SOURCE_RETRIEVED,
                         "operational_status": "OBSERVED_NOT_FILED_OR_CLEARED",
+                        "source": observed_source.model_dump(mode="json"),
                     },
                     "atmosphere": demo.atmosphere.source.model_dump(mode="json"),
                     "terrain": demo.terrain.source.model_dump(mode="json"),

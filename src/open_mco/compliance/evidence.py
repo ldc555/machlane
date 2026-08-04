@@ -31,6 +31,7 @@ def compliance_matrix() -> dict[str, ComplianceStatus]:
 
     return {
         "aircraft_configuration_traceability": ComplianceStatus.SUPPORTED,
+        "route_provenance": ComplianceStatus.SUPPORTED,
         "weather_provenance": ComplianceStatus.SUPPORTED,
         "terrain_provenance": ComplianceStatus.SUPPORTED,
         "propagation_model_identification": ComplianceStatus.SUPPORTED,
@@ -108,6 +109,11 @@ def write_evidence_package(
         source_data_checksums={
             **atmosphere_source.checksums,
             **({"terrain": terrain_source.checksum} if terrain_source.checksum else {}),
+            **(
+                {"route": route.source.checksum}
+                if route.source is not None and route.source.checksum
+                else {}
+            ),
         },
         weather_source=atmosphere_source,
         terrain_source=terrain_source,
@@ -125,6 +131,7 @@ def write_evidence_package(
         completed_at=datetime.now(UTC),
     )
     (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    (run_dir / "route.json").write_text(route.model_dump_json(indent=2), encoding="utf-8")
     with (run_dir / "segment_limits.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle, fieldnames=["segment_id", "status", "selected_mach", "selected_altitude_m"]

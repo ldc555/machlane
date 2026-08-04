@@ -571,6 +571,7 @@ Each planning run creates:
 ```text
 results/<run_id>/
 ├── manifest.json
+├── route.json
 ├── segment_limits.csv
 ├── candidate_evaluations.parquet
 ├── corridor.geojson
@@ -585,6 +586,7 @@ The run manifest records:
 - aircraft file checksum;
 - configuration checksum;
 - source-data checksums;
+- normalized route geometry and OpenSky provenance when an observed track is used;
 - weather source/cycle/valid time;
 - terrain source/resolution/datum;
 - propagation engine/version;

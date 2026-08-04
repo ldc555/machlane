@@ -15,6 +15,7 @@ def test_demo_writes_complete_honest_evidence_package(tmp_path: Path, monkeypatc
     run_dir = run_demo(results_root=tmp_path)
     expected = {
         "manifest.json",
+        "route.json",
         "segment_limits.csv",
         "candidate_evaluations.parquet",
         "corridor.geojson",
@@ -24,6 +25,9 @@ def test_demo_writes_complete_honest_evidence_package(tmp_path: Path, monkeypatc
     assert {path.name for path in run_dir.iterdir()} == expected
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["propagation_engine"] == "mock_mco"
+    route = json.loads((run_dir / "route.json").read_text())
+    assert route["source"]["provider"] == "OurAirports + pyproj.Geod"
+    assert manifest["compliance_statuses"]["route_provenance"] == "SUPPORTED"
     assert manifest["compliance_statuses"]["primary_boom_0_11_psf"] == "NOT_IMPLEMENTED"
     assert "NOT FAA APPROVED" in (run_dir / "report.html").read_text()
     assert not pd.read_parquet(run_dir / "candidate_evaluations.parquet").empty
