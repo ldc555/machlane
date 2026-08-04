@@ -49,9 +49,6 @@ h1,h2,h3 { letter-spacing:-.02em; }
 .brand-mark { width:2rem; height:2rem; display:grid; place-items:center; border:1px solid #3a536d; border-radius:.55rem; color:var(--teal); background:#101c2a; }
 .run-state { color:#9fb2c7; font:600 .72rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.08em; text-transform:uppercase; }
 .notice { border:1px solid #855b27; background:#291f13; color:#ffd898; padding:.55rem .8rem; border-radius:.6rem; font-size:.78rem; margin-bottom:.85rem; }
-.workflow { display:grid; grid-template-columns:repeat(6,1fr); gap:.4rem; margin:0 0 .85rem; }
-.workflow span { padding:.5rem .6rem; border:1px solid var(--line); border-radius:.5rem; color:var(--muted); font-size:.72rem; background:#0d1723; }
-.workflow b { color:var(--teal); margin-right:.3rem; }
 .section-kicker { color:#6f879e; font:700 .68rem/1.2 ui-monospace,SFMono-Regular,monospace; letter-spacing:.12em; text-transform:uppercase; margin:.3rem 0 .65rem; }
 .panel-note { padding:.65rem .8rem; border:1px solid var(--line); background:#0c1520; border-radius:.6rem; color:#9fb2c7; font-size:.76rem; line-height:1.45; }
 .mission-strip { display:flex; gap:.9rem; flex-wrap:wrap; padding:.58rem .75rem; margin:.35rem 0 .65rem; border:1px solid var(--line); background:#0c1520; border-radius:.55rem; color:#8ba0b7; font-size:.72rem; }
@@ -75,7 +72,7 @@ h1,h2,h3 { letter-spacing:-.02em; }
 .stTabs [data-baseweb="tab"] { color:#8da2b7; height:2.7rem; }
 .stTabs [aria-selected="true"] { color:#eaf5ff; }
 .stButton button { border:1px solid #2f6e69; background:#123a38; color:#d8fffa; }
-@media (max-width:900px) { .workflow,.calc-grid { grid-template-columns:repeat(2,1fr); } .block-container { padding:.8rem; } }
+@media (max-width:900px) { .calc-grid { grid-template-columns:repeat(2,1fr); } .block-container { padding:.8rem; } }
 </style>
 """,
     unsafe_allow_html=True,
@@ -97,7 +94,6 @@ st.markdown(
 <div class="brand-row"><div class="brand"><span class="brand-mark">M</span>MachLane</div>
 <div class="run-state">Synthetic workspace · deterministic</div></div>
 <div class="notice"><b>Research prototype — not FAA approved.</b> No surface-overpressure or sonic-boom compliance result is calculated.</div>
-<div class="workflow"><span><b>01</b>Aircraft</span><span><b>02</b>Atmosphere</span><span><b>03</b>Route</span><span><b>04</b>Plan</span><span><b>05</b>Validate</span><span><b>06</b>Evidence</span></div>
 """,
     unsafe_allow_html=True,
 )
@@ -163,162 +159,186 @@ summary_columns[3].metric(
     "Boom output", "Not modeled", "No ground overpressure", delta_color="off"
 )
 
-workspace, inspector = st.columns([3.15, 1], gap="medium")
+@st.fragment
+def live_route_tracker() -> None:
+    """Rerun only the position-dependent map and inspector during slider interaction."""
 
-with workspace:
-    progress_percent = st.slider("Aircraft position", 0, 100, 24, 1, format="%d%%")
+    workspace, inspector = st.columns([3.15, 1], gap="medium")
+    with workspace:
+        progress_percent = st.slider(
+            "Aircraft position",
+            0,
+            100,
+            24,
+            1,
+            format="%d%%",
+            key="aircraft_progress",
+        )
     progress = progress_percent / 100
+    active_index = active_segment_index(demo.route, progress)
+    active = rows[active_index]
+    aircraft_lat, aircraft_lon = interpolate_position(demo.route, progress)
+    aircraft_display_lon = display_longitude(aircraft_lon, map_longitude)
+    active_limit = demo.result.segment_limits[active_index]
+    active_altitude_m = active_limit.selected_altitude_m or 0.0
+    active_atmosphere = demo.segment_atmospheres[active_index]
+    weather_at_altitude = atmosphere_metrics(
+        active_atmosphere, active_altitude_m, float(active["bearing_deg"])
+    )
 
+    with workspace:
+        title_left, title_right = st.columns([3, 1])
+        with title_left:
+            st.subheader("Route corridor")
+            st.caption("Modeled operational envelope · not legal airspace approval")
+        with title_right:
+            st.markdown(
+                '<div style="text-align:right"><span class="eligible">SYNTHETIC ELIGIBLE</span></div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
+            unsafe_allow_html=True,
+        )
+        map_layers = [
+            pdk.Layer(
+                "PolygonLayer",
+                corridors,
+                get_polygon="polygon",
+                get_fill_color="color",
+                get_line_color=[45, 212, 191, 120],
+                line_width_min_pixels=1,
+                pickable=True,
+            ),
+            pdk.Layer(
+                "PathLayer",
+                rows,
+                get_path="path",
+                get_color="color",
+                width_min_pixels=3,
+                pickable=True,
+            ),
+            pdk.Layer(
+                "ScatterplotLayer",
+                [
+                    {"position": [display_longitude(lon, map_longitude), lat]}
+                    for lat, lon in demo.route.waypoints
+                ],
+                get_position="position",
+                get_radius=2700,
+                get_fill_color=[226, 236, 246, 220],
+                get_line_color=[6, 12, 20, 255],
+                line_width_min_pixels=2,
+                stroked=True,
+            ),
+            pdk.Layer(
+                "TextLayer",
+                [
+                    {
+                        "position": [
+                            display_longitude(mission.origin.longitude, map_longitude),
+                            mission.origin.latitude,
+                        ],
+                        "label": mission.origin.iata,
+                    },
+                    {
+                        "position": [
+                            display_longitude(mission.destination.longitude, map_longitude),
+                            mission.destination.latitude,
+                        ],
+                        "label": mission.destination.iata,
+                    },
+                ],
+                get_position="position",
+                get_text="label",
+                get_size=15,
+                get_pixel_offset=[0, -18],
+                get_color=[226, 236, 246, 230],
+            ),
+            pdk.Layer(
+                "ScatterplotLayer",
+                [{"position": [aircraft_display_lon, aircraft_lat]}],
+                get_position="position",
+                get_radius=7000,
+                radius_min_pixels=16,
+                radius_max_pixels=24,
+                get_fill_color=[255, 255, 255, 245],
+                get_line_color=[45, 212, 191, 255],
+                line_width_min_pixels=4,
+                stroked=True,
+            ),
+            pdk.Layer(
+                "TextLayer",
+                [{"position": [aircraft_display_lon, aircraft_lat], "label": "✈"}],
+                get_position="position",
+                get_text="label",
+                get_size=36,
+                get_color=[7, 17, 27, 255],
+                get_angle=active["bearing_deg"] - 45,
+            ),
+        ]
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=map_layers,
+                map_style=pdk.map_styles.CARTO_DARK,
+                initial_view_state=pdk.ViewState(
+                    latitude=map_latitude,
+                    longitude=map_longitude,
+                    zoom=map_zoom,
+                    pitch=8,
+                    bearing=0,
+                ),
+                tooltip={
+                    "html": "<b>{segment}</b><br/>Mach {mach}<br/>{altitude_ft} ft<br/>{decision}",
+                    "style": {"backgroundColor": "#0b1420", "color": "#e5eef8"},
+                },
+            ),
+            height=490,
+        )
+        legend_left, legend_right = st.columns([2, 1])
+        with legend_left:
+            st.caption("Colored sections: internally uniform synthetic weather regimes")
+        with legend_right:
+            st.caption(f"{progress:.0%} complete · {active['segment']}")
+
+    with inspector:
+        st.markdown('<div class="section-kicker">Live inspector</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="status-card"><div class="label">Active segment</div><div class="value">{active["segment"]}</div><div class="meta">{active["start_nmi"]:.1f}–{active["end_nmi"]:.1f} nmi · track {active["bearing_deg"]:.0f}°</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="status-card"><div class="label">Recommendation</div><div class="value">Mach {active["mach"]:.2f}</div><div class="meta">{active["altitude_ft"]:,} ft · scenario target unvalidated</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="status-card"><div class="label">Ambient profile</div><div class="value">{weather_at_altitude["pressure_hpa"]:.0f} hPa</div><div class="meta">{weather_at_altitude["temperature_c"]:.1f} °C · wind {weather_at_altitude["wind_speed_kt"]:.0f} kt · synthetic</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="status-card"><div class="label">Why this segment starts</div><div class="value" style="font-size:.92rem">{active["boundary_reason"]}</div><div class="meta">{active["weather_samples"]} atmosphere samples grouped</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT MODELED</span></div><div class="meta">No 0.11 psf determination</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"{active['accepted_candidates']} of {active['total_candidates']} grid candidates accepted by the mock boundary."
+        )
+
+
+live_route_tracker()
+
+progress = float(st.session_state.get("aircraft_progress", 24)) / 100
 active_index = active_segment_index(demo.route, progress)
 active = rows[active_index]
-aircraft_lat, aircraft_lon = interpolate_position(demo.route, progress)
-aircraft_display_lon = display_longitude(aircraft_lon, map_longitude)
 active_limit = demo.result.segment_limits[active_index]
 active_altitude_m = active_limit.selected_altitude_m or 0.0
 active_atmosphere = demo.segment_atmospheres[active_index]
 weather_at_altitude = atmosphere_metrics(
     active_atmosphere, active_altitude_m, float(active["bearing_deg"])
 )
-
-with workspace:
-    title_left, title_right = st.columns([3, 1])
-    with title_left:
-        st.subheader("Route corridor")
-        st.caption("Modeled operational envelope · not legal airspace approval")
-    with title_right:
-        st.markdown(
-            '<div style="text-align:right"><span class="eligible">SYNTHETIC ELIGIBLE</span></div>',
-            unsafe_allow_html=True,
-        )
-    st.markdown(
-        f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
-        unsafe_allow_html=True,
-    )
-
-    map_layers = [
-        pdk.Layer(
-            "PolygonLayer",
-            corridors,
-            get_polygon="polygon",
-            get_fill_color="color",
-            get_line_color=[45, 212, 191, 120],
-            line_width_min_pixels=1,
-            pickable=True,
-        ),
-        pdk.Layer(
-            "PathLayer",
-            rows,
-            get_path="path",
-            get_color="color",
-            width_min_pixels=3,
-            pickable=True,
-        ),
-        pdk.Layer(
-            "ScatterplotLayer",
-            [
-                {"position": [display_longitude(lon, map_longitude), lat]}
-                for lat, lon in demo.route.waypoints
-            ],
-            get_position="position",
-            get_radius=2700,
-            get_fill_color=[226, 236, 246, 220],
-            get_line_color=[6, 12, 20, 255],
-            line_width_min_pixels=2,
-            stroked=True,
-        ),
-        pdk.Layer(
-            "TextLayer",
-            [
-                {
-                    "position": [
-                        display_longitude(mission.origin.longitude, map_longitude),
-                        mission.origin.latitude,
-                    ],
-                    "label": mission.origin.iata,
-                },
-                {
-                    "position": [
-                        display_longitude(mission.destination.longitude, map_longitude),
-                        mission.destination.latitude,
-                    ],
-                    "label": mission.destination.iata,
-                },
-            ],
-            get_position="position",
-            get_text="label",
-            get_size=15,
-            get_pixel_offset=[0, -18],
-            get_color=[226, 236, 246, 230],
-        ),
-        pdk.Layer(
-            "ScatterplotLayer",
-            [{"position": [aircraft_display_lon, aircraft_lat]}],
-            get_position="position",
-            get_radius=5200,
-            get_fill_color=[255, 255, 255, 245],
-            get_line_color=[45, 212, 191, 255],
-            line_width_min_pixels=4,
-            stroked=True,
-        ),
-        pdk.Layer(
-            "TextLayer",
-            [{"position": [aircraft_display_lon, aircraft_lat], "label": ">"}],
-            get_position="position",
-            get_text="label",
-            get_size=20,
-            get_color=[7, 17, 27, 255],
-            get_angle=active["bearing_deg"] - 90,
-        ),
-    ]
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=map_layers,
-            map_style=pdk.map_styles.CARTO_DARK,
-            initial_view_state=pdk.ViewState(
-                latitude=map_latitude,
-                longitude=map_longitude,
-                zoom=map_zoom,
-                pitch=8,
-                bearing=0,
-            ),
-            tooltip={
-                "html": "<b>{segment}</b><br/>Mach {mach}<br/>{altitude_ft} ft<br/>{decision}",
-                "style": {"backgroundColor": "#0b1420", "color": "#e5eef8"},
-            },
-        ),
-        height=490,
-    )
-    legend_left, legend_right = st.columns([2, 1])
-    with legend_left:
-        st.caption("Colored sections: internally uniform synthetic weather regimes")
-    with legend_right:
-        st.caption(f"{progress:.0%} complete · {active['segment']}")
-
-with inspector:
-    st.markdown('<div class="section-kicker">Live inspector</div>', unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="status-card"><div class="label">Active segment</div><div class="value">{active["segment"]}</div><div class="meta">{active["start_nmi"]:.1f}–{active["end_nmi"]:.1f} nmi · track {active["bearing_deg"]:.0f}°</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="status-card"><div class="label">Recommendation</div><div class="value">Mach {active["mach"]:.2f}</div><div class="meta">{active["altitude_ft"]:,} ft · scenario target unvalidated</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="status-card"><div class="label">Ambient profile</div><div class="value">{weather_at_altitude["pressure_hpa"]:.0f} hPa</div><div class="meta">{weather_at_altitude["temperature_c"]:.1f} °C · wind {weather_at_altitude["wind_speed_kt"]:.0f} kt · synthetic</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="status-card"><div class="label">Why this segment starts</div><div class="value" style="font-size:.92rem">{active["boundary_reason"]}</div><div class="meta">{active["weather_samples"]} atmosphere samples grouped</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT MODELED</span></div><div class="meta">No 0.11 psf determination</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        f"{active['accepted_candidates']} of {active['total_candidates']} grid candidates accepted by the mock boundary."
-    )
 
 plan_tab, atmosphere_tab, model_tab, evidence_tab = st.tabs(
     ["Weather segments", "Atmosphere", "How it works", "Evidence"]
