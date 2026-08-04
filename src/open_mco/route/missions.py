@@ -131,14 +131,6 @@ _MISSIONS = (
         "Long transcontinental research case with full CONUS forecast coverage.",
     ),
     _mission(
-        "lax_hnl",
-        "LAX",
-        "HNL",
-        "Pacific U.S.",
-        "us_oceanic",
-        "Oceanic high-speed concept connecting the mainland and Hawaii.",
-    ),
-    _mission(
         "bos_hnl",
         "BOS",
         "HNL",

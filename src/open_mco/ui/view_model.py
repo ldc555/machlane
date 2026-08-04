@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Any
 
@@ -39,6 +40,40 @@ def atmosphere_metrics(
             zonal_mps, meridional_mps, bearing_deg
         )
         * METERS_PER_SECOND_TO_KNOTS,
+    }
+
+
+def mock_live_metrics(
+    baseline: dict[str, float], mission_id: str, progress: float
+) -> dict[str, float]:
+    """Return smooth, deterministic pseudo-live variations around a synthetic profile.
+
+    The values deliberately look like a moving model feed without depending on a network or
+    pretending to be observations. Mission-derived phase offsets make each route distinct, while
+    continuous sine waves keep slider motion fluid and reproducible for tests and demonstrations.
+    """
+
+    bounded = min(1.0, max(0.0, progress))
+    phases = [
+        byte / 255 * 2 * math.pi
+        for byte in hashlib.sha256(mission_id.encode()).digest()[:8]
+    ]
+
+    def variation(primary: int, secondary: int, cycles: float) -> float:
+        angle = bounded * cycles * 2 * math.pi
+        return math.sin(angle + phases[primary]) + 0.35 * math.sin(
+            angle * 2.3 + phases[secondary]
+        )
+
+    return {
+        "pressure_hpa": max(
+            0.0, baseline["pressure_hpa"] + 1.6 * variation(0, 1, 2.4)
+        ),
+        "temperature_c": baseline["temperature_c"] + 0.9 * variation(2, 3, 1.7),
+        "wind_speed_kt": max(
+            0.0, baseline["wind_speed_kt"] + 3.8 * variation(4, 5, 2.8)
+        ),
+        "along_wind_kt": baseline["along_wind_kt"] + 3.2 * variation(6, 7, 2.1),
     }
 
 

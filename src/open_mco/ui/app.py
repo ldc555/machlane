@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypeVar
 
 import pandas as pd
@@ -28,8 +29,22 @@ from open_mco.ui.view_model import (
     atmosphere_metrics,
     corridor_rows,
     display_longitude,
+    mock_live_metrics,
     segment_rows,
 )
+
+PLANE_ICON_MAPPING = {
+    "plane": {
+        "x": 0,
+        "y": 0,
+        "width": 64,
+        "height": 64,
+        "anchorX": 32,
+        "anchorY": 32,
+        "mask": False,
+    }
+}
+PLANE_ICON_ATLAS = str(Path(__file__).with_name("static") / "plane.png")
 
 # Streamlit renamed ``experimental_fragment`` to ``fragment`` in 1.37. Prefer the stable name, fall
 # back to the experimental one, and degrade to a no-op decorator on older pins (the page simply
@@ -66,16 +81,20 @@ h1,h2,h3 { letter-spacing:-.02em; }
 .brand-row { display:flex; align-items:center; justify-content:space-between; margin:.15rem 0 .75rem; }
 .brand { display:flex; align-items:center; gap:.75rem; font-size:1.05rem; font-weight:750; letter-spacing:.02em; }
 .brand-mark { width:2rem; height:2rem; display:grid; place-items:center; border:1px solid #3a536d; border-radius:.55rem; color:var(--teal); background:#101c2a; }
-.run-state { color:#9fb2c7; font:600 .72rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.08em; text-transform:uppercase; }
+.run-state { color:#c6d5e5; font:700 .72rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.08em; text-transform:uppercase; }
 .notice { border:1px solid #855b27; background:#291f13; color:#ffd898; padding:.55rem .8rem; border-radius:.6rem; font-size:.78rem; margin-bottom:.85rem; }
+.mode-banner { min-height:3.35rem; display:flex; align-items:center; gap:.65rem; border-radius:.65rem; padding:.65rem .85rem; margin:.1rem 0 .75rem; font-size:.78rem; }
+.mode-banner b { letter-spacing:.1em; font:800 .72rem/1 ui-monospace,SFMono-Regular,monospace; }
+.mode-banner.mock { color:#fff4b8; border:1px solid #d9a900; background:linear-gradient(90deg,#3b2e08,#211c0d); }
+.mode-banner.baseline { color:#d8e8f7; border:1px solid #405873; background:#101b29; }
 .section-kicker { color:#6f879e; font:700 .68rem/1.2 ui-monospace,SFMono-Regular,monospace; letter-spacing:.12em; text-transform:uppercase; margin:.3rem 0 .65rem; }
 .panel-note { padding:.65rem .8rem; border:1px solid var(--line); background:#0c1520; border-radius:.6rem; color:#9fb2c7; font-size:.76rem; line-height:1.45; }
 .mission-strip { display:flex; gap:.9rem; flex-wrap:wrap; padding:.58rem .75rem; margin:.35rem 0 .65rem; border:1px solid var(--line); background:#0c1520; border-radius:.55rem; color:#8ba0b7; font-size:.72rem; }
 .mission-strip b { color:#dbe8f4; font-weight:650; }
 .status-card { border:1px solid var(--line); background:linear-gradient(145deg,#111d2b,#0c1520); border-radius:.7rem; padding:.8rem .9rem; margin:.35rem 0 .65rem; }
-.status-card .label { color:#70879e; font-size:.68rem; letter-spacing:.1em; text-transform:uppercase; }
+.status-card .label { color:#b8c9da; font-size:.68rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; }
 .status-card .value { color:#e7f8f5; font-size:1.15rem; font-weight:750; margin:.15rem 0; }
-.status-card .meta { color:#8ba0b7; font-size:.74rem; }
+.status-card .meta { color:#b3c4d5; font-size:.74rem; }
 .calc-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:.55rem; margin:.4rem 0 .8rem; }
 .calc-step { border:1px solid var(--line); background:#0d1722; border-radius:.65rem; padding:.75rem; min-height:7rem; }
 .calc-step .number { color:var(--teal); font:700 .68rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.1em; }
@@ -83,9 +102,11 @@ h1,h2,h3 { letter-spacing:-.02em; }
 .calc-step span { color:#8ba0b7; font-size:.73rem; line-height:1.4; }
 .eligible { display:inline-block; padding:.24rem .46rem; color:#8ff5e8; background:#123c3a; border:1px solid #1c716a; border-radius:99px; font:700 .66rem/1 ui-monospace,SFMono-Regular,monospace; }
 .pending { display:inline-block; padding:.24rem .46rem; color:#ffd38a; background:#3a2b16; border:1px solid #795a28; border-radius:99px; font:700 .66rem/1 ui-monospace,SFMono-Regular,monospace; }
-[data-testid="stMetric"] { background:#0d1722; border:1px solid var(--line); padding:.65rem .75rem; border-radius:.6rem; }
-[data-testid="stMetricLabel"] { color:#71869c; }
-[data-testid="stMetricValue"] { font-size:1.35rem; }
+[data-testid="stMetric"] { background:linear-gradient(145deg,#152437,#0e1825); border:1px solid #405672; padding:.72rem .82rem; border-radius:.65rem; box-shadow:0 8px 24px rgba(0,0,0,.16); }
+[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * { color:#d8e5f2 !important; font-weight:700 !important; }
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] * { color:#ffffff !important; font-size:1.42rem; font-weight:800 !important; text-shadow:0 1px 12px rgba(255,255,255,.08); }
+[data-testid="stMetricDelta"], [data-testid="stMetricDelta"] * { color:#c2d2e3 !important; opacity:1 !important; }
+[data-testid="stToggle"] label, [data-testid="stToggle"] p { color:#f4f8fc !important; font-weight:750 !important; }
 [data-testid="stVerticalBlockBorderWrapper"] { border-color:var(--line); background:#0c1520; }
 .stTabs [data-baseweb="tab-list"] { gap:.4rem; border-bottom:1px solid var(--line); }
 .stTabs [data-baseweb="tab"] { color:#8da2b7; height:2.7rem; }
@@ -111,11 +132,31 @@ def scenario(mission_id: str, cache_schema: str):
 st.markdown(
     """
 <div class="brand-row"><div class="brand"><span class="brand-mark">M</span>MachLane</div>
-<div class="run-state">Synthetic workspace · deterministic</div></div>
+<div class="run-state">Mission feed simulator</div></div>
 <div class="notice"><b>Research prototype — not FAA approved.</b> No surface-overpressure or sonic-boom compliance result is calculated.</div>
 """,
     unsafe_allow_html=True,
 )
+
+mode_banner, mode_control = st.columns([4.5, 1], vertical_alignment="center")
+with mode_control:
+    mock_mode = st.toggle(
+        "MOCK mode",
+        value=True,
+        key="mock_feed_enabled",
+        help="Simulates changing HRRR, GEFS, terrain, and aircraft channels locally. It never fetches or presents real observations.",
+    )
+with mode_banner:
+    if mock_mode:
+        st.markdown(
+            '<div class="mode-banner mock"><b>MOCK</b><span>Simulated HRRR · GEFS · 3DEP · aircraft telemetry. Randomized, local, and never operational data.</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="mode-banner baseline"><b>BASELINE</b><span>Deterministic synthetic backend. Live NOAA and terrain feeds remain disconnected.</span></div>',
+            unsafe_allow_html=True,
+        )
 
 missions = list_missions()
 mission_id = st.selectbox(
@@ -172,10 +213,16 @@ summary_columns[1].metric(
     delta_color="off",
 )
 summary_columns[2].metric(
-    "Weather input", "Synthetic", "Live NOAA not connected", delta_color="off"
+    "Weather input",
+    "MOCK feed" if mock_mode else "Synthetic",
+    "HRRR · GEFS · 3DEP simulated" if mock_mode else "Live NOAA not connected",
+    delta_color="off",
 )
 summary_columns[3].metric(
-    "Boom output", "Not modeled", "No ground overpressure", delta_color="off"
+    "Boom output",
+    "MOCK only" if mock_mode else "Not modeled",
+    "No ground overpressure",
+    delta_color="off",
 )
 
 # The position slider lives inside the fragment below. Its value is persisted in session state so
@@ -269,6 +316,31 @@ def render_workspace() -> None:
         drag_index = active_segment_index(demo.route, drag_progress)
         drag_row = rows[drag_index]
         aircraft = aircraft_view(demo.route, drag_progress, map_longitude)
+        drag_weather = atmosphere_metrics(
+            demo.segment_atmospheres[drag_index],
+            demo.result.segment_limits[drag_index].selected_altitude_m or 0.0,
+            float(drag_row["bearing_deg"]),
+        )
+        if mock_mode:
+            drag_weather = mock_live_metrics(drag_weather, mission_id, drag_progress)
+
+        st.markdown(
+            '<div class="section-kicker">Flight-level atmosphere · updates with aircraft position</div>',
+            unsafe_allow_html=True,
+        )
+        live_weather_columns = st.columns(4)
+        live_weather_columns[0].metric(
+            "Ambient pressure", f'{drag_weather["pressure_hpa"]:.0f} hPa'
+        )
+        live_weather_columns[1].metric(
+            "Temperature", f'{drag_weather["temperature_c"]:.1f} °C'
+        )
+        live_weather_columns[2].metric(
+            "Wind speed", f'{drag_weather["wind_speed_kt"]:.0f} kt'
+        )
+        live_weather_columns[3].metric(
+            "Along-track wind", f'{drag_weather["along_wind_kt"]:+.0f} kt'
+        )
 
         title_left, title_right = st.columns([3, 1])
         with title_left:
@@ -280,7 +352,7 @@ def render_workspace() -> None:
                 unsafe_allow_html=True,
             )
         st.markdown(
-            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
+            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Mock SST</b></span><span>Atmosphere <b>{"MOCK HRRR / GEFS" if mock_mode else "Synthetic"}</b></span><span>Terrain <b>{"MOCK 3DEP" if mock_mode else "Flat"}</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
             unsafe_allow_html=True,
         )
 
@@ -288,21 +360,39 @@ def render_workspace() -> None:
             pdk.Layer(
                 "ScatterplotLayer",
                 [{"position": [aircraft["display_longitude"], aircraft["latitude"]]}],
+                id="aircraft-halo",
                 get_position="position",
-                get_radius=5200,
-                get_fill_color=[255, 255, 255, 245],
-                get_line_color=[45, 212, 191, 255],
-                line_width_min_pixels=4,
+                get_radius=18,
+                radius_units="pixels",
+                radius_min_pixels=18,
+                radius_max_pixels=18,
+                get_fill_color=[10, 17, 27, 48],
+                get_line_color=[255, 213, 0, 255],
+                line_width_min_pixels=3,
                 stroked=True,
             ),
             pdk.Layer(
-                "TextLayer",
-                [{"position": [aircraft["display_longitude"], aircraft["latitude"]], "label": ">"}],
+                "IconLayer",
+                [
+                    {
+                        "position": [
+                            aircraft["display_longitude"],
+                            aircraft["latitude"],
+                        ],
+                        "icon": "plane",
+                    }
+                ],
+                id="aircraft-plane",
                 get_position="position",
-                get_text="label",
-                get_size=20,
-                get_color=[7, 17, 27, 255],
-                get_angle=aircraft["bearing_deg"] - 90,
+                icon_atlas=PLANE_ICON_ATLAS,
+                icon_mapping=PLANE_ICON_MAPPING,
+                get_icon="icon",
+                get_size=48,
+                get_color=[255, 255, 255, 255],
+                size_scale=1,
+                size_min_pixels=48,
+                size_max_pixels=48,
+                get_angle=aircraft["bearing_deg"],
             ),
         ]
         st.pydeck_chart(
@@ -330,14 +420,9 @@ def render_workspace() -> None:
             st.caption(f"{drag_progress:.0%} complete · {drag_row['segment']}")
 
     with inspector:
-        drag_weather = atmosphere_metrics(
-            demo.segment_atmospheres[drag_index],
-            demo.result.segment_limits[drag_index].selected_altitude_m or 0.0,
-            float(drag_row["bearing_deg"]),
-        )
         st.markdown('<div class="section-kicker">Live inspector</div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="status-card"><div class="label">Active segment</div><div class="value">{drag_row["segment"]}</div><div class="meta">{drag_row["start_nmi"]:.1f}–{drag_row["end_nmi"]:.1f} nmi · track {drag_row["bearing_deg"]:.0f}°</div></div>',
+            f'<div class="status-card"><div class="label">Aircraft position</div><div class="value">{drag_progress:.0%} · {drag_row["segment"]}</div><div class="meta">{aircraft["latitude"]:.2f}°, {aircraft["longitude"]:.2f}° · track {aircraft["bearing_deg"]:.0f}°</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
@@ -345,7 +430,7 @@ def render_workspace() -> None:
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="status-card"><div class="label">Ambient profile</div><div class="value">{drag_weather["pressure_hpa"]:.0f} hPa</div><div class="meta">{drag_weather["temperature_c"]:.1f} °C · wind {drag_weather["wind_speed_kt"]:.0f} kt · synthetic</div></div>',
+            f'<div class="status-card"><div class="label">Ambient profile</div><div class="value">{drag_weather["pressure_hpa"]:.0f} hPa</div><div class="meta">{drag_weather["temperature_c"]:.1f} °C · wind {drag_weather["wind_speed_kt"]:.0f} kt · {"MOCK feed" if mock_mode else "synthetic"}</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
@@ -408,15 +493,9 @@ with plan_tab:
 
 with atmosphere_tab:
     st.caption(
-        "Profiles follow the aircraft's active segment. The map and inspector above track the "
-        "slider live; these deeper panels refresh on a full reload, e.g. changing mission."
+        "The high-contrast flight-level values above the map follow the aircraft live. These charts "
+        "show the full vertical profile for the selected mission snapshot."
     )
-    weather_columns = st.columns(4)
-    weather_columns[0].metric("Ambient pressure", f'{weather_at_altitude["pressure_hpa"]:.0f} hPa')
-    weather_columns[1].metric("Temperature", f'{weather_at_altitude["temperature_c"]:.1f} °C')
-    weather_columns[2].metric("Wind speed", f'{weather_at_altitude["wind_speed_kt"]:.0f} kt')
-    weather_columns[3].metric("Along-track wind", f'{weather_at_altitude["along_wind_kt"]:+.0f} kt')
-
     chart_left, chart_right = st.columns(2)
     altitude_ft = [altitude * METERS_TO_FEET for altitude in active_atmosphere.altitude_m]
     pressure_hpa = [pressure / 100 for pressure in active_atmosphere.pressure_pa]
@@ -488,19 +567,19 @@ with atmosphere_tab:
     st.warning(
         "Ambient pressure describes the surrounding atmosphere. Sonic-boom overpressure is a separate pressure disturbance and is not calculated here."
     )
-    with st.expander("View profile values"):
-        st.dataframe(
-            pd.DataFrame(
-                {
-                    "Altitude (ft)": [round(value) for value in altitude_ft],
-                    "Pressure (hPa)": [round(value, 1) for value in pressure_hpa],
-                    "Temperature (°C)": [round(value, 1) for value in temperature_c],
-                    "Wind (kt)": [round(value, 1) for value in wind_speed_kt],
-                }
-            ),
-            hide_index=True,
-            width="stretch",
-        )
+    st.markdown("#### Profile values")
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Altitude (ft)": [round(value) for value in altitude_ft],
+                "Pressure (hPa)": [round(value, 1) for value in pressure_hpa],
+                "Temperature (°C)": [round(value, 1) for value in temperature_c],
+                "Wind (kt)": [round(value, 1) for value in wind_speed_kt],
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+    )
 
 with model_tab:
     st.markdown("#### What MachLane calculates today")

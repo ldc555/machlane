@@ -10,6 +10,7 @@ from open_mco.ui.view_model import (
     atmosphere_metrics,
     corridor_rows,
     display_longitude,
+    mock_live_metrics,
     segment_rows,
 )
 
@@ -117,3 +118,23 @@ def test_atmosphere_metrics_distinguish_ambient_pressure_and_wind() -> None:
     assert metrics["temperature_c"] < -50
     assert metrics["wind_speed_kt"] > 40
     assert metrics["along_wind_kt"] > 40
+
+
+def test_mock_live_metrics_are_smooth_reproducible_and_route_specific() -> None:
+    baseline = {
+        "pressure_hpa": 118.0,
+        "temperature_c": -56.2,
+        "wind_speed_kt": 49.0,
+        "along_wind_kt": 48.0,
+    }
+
+    first = mock_live_metrics(baseline, "dfw_jfk", 0.42)
+    repeated = mock_live_metrics(baseline, "dfw_jfk", 0.42)
+    adjacent = mock_live_metrics(baseline, "dfw_jfk", 0.43)
+    other_route = mock_live_metrics(baseline, "den_nrt", 0.42)
+
+    assert first == repeated
+    assert first != adjacent
+    assert first != other_route
+    assert abs(first["pressure_hpa"] - adjacent["pressure_hpa"]) < 1.0
+    assert abs(first["temperature_c"] - adjacent["temperature_c"]) < 1.0

@@ -47,7 +47,8 @@ def test_route_rejects_bad_inputs() -> None:
 
 def test_mission_catalog_uses_real_endpoints_and_wgs84_distance() -> None:
     missions = list_missions()
-    assert {mission.mission_id for mission in missions} >= {
+    mission_ids = {mission.mission_id for mission in missions}
+    assert mission_ids >= {
         "dfw_jfk",
         "dfw_lax",
         "lax_jfk",
@@ -55,6 +56,7 @@ def test_mission_catalog_uses_real_endpoints_and_wgs84_distance() -> None:
         "den_nrt",
         "bos_hnl",
     }
+    assert "lax_hnl" not in mission_ids
 
     route = get_mission("dfw_jfk").build_route()
     assert route.waypoints == ((32.896801, -97.038002), (40.639447, -73.779317))
