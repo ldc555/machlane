@@ -29,10 +29,15 @@ def test_pressure_color_is_blue_low_and_red_high() -> None:
 
 
 def test_mock_flight_state_is_supersonic_only_in_cruise_corridor() -> None:
-    departure = mock_flight_state(0, cruise_mach=1.1, cruise_altitude_ft=50_000)
-    acceleration = mock_flight_state(0.18, cruise_mach=1.1, cruise_altitude_ft=50_000)
-    cruise = mock_flight_state(0.5, cruise_mach=1.1, cruise_altitude_ft=50_000)
-    arrival = mock_flight_state(1, cruise_mach=1.1, cruise_altitude_ft=50_000)
+    inputs = {
+        "route_distance_nmi": 1_200,
+        "cruise_mach": 1.1,
+        "cruise_altitude_ft": 50_000,
+    }
+    departure = mock_flight_state(0, **inputs)
+    acceleration = mock_flight_state(0.125, **inputs)
+    cruise = mock_flight_state(0.5, **inputs)
+    arrival = mock_flight_state(1, **inputs)
 
     assert departure == {
         "phase": "Takeoff / initial climb",

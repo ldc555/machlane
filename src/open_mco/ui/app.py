@@ -433,6 +433,7 @@ def render_workspace() -> None:
         aircraft = aircraft_view(display_route, drag_progress, map_longitude)
         flight_state = mock_flight_state(
             drag_progress,
+            route_distance_nmi=distance_nmi,
             cruise_mach=float(drag_row["mach"]),
             cruise_altitude_ft=float(drag_row["altitude_ft"]),
         )

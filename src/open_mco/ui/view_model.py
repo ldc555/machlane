@@ -36,7 +36,11 @@ def pressure_color(value_hpa: float, minimum_hpa: float, maximum_hpa: float) -> 
 
 
 def mock_flight_state(
-    progress: float, *, cruise_mach: float, cruise_altitude_ft: float
+    progress: float,
+    *,
+    route_distance_nmi: float,
+    cruise_mach: float,
+    cruise_altitude_ft: float,
 ) -> dict[str, float | str | bool]:
     """Return a phase-aware synthetic SST state without supersonic takeoff or landing.
 
@@ -45,42 +49,55 @@ def mock_flight_state(
     still unavailable.
     """
 
+    if route_distance_nmi <= 0:
+        raise ValueError("route distance must be positive")
     bounded = min(1.0, max(0.0, progress))
+    distance_nmi = bounded * route_distance_nmi
+    remaining_nmi = route_distance_nmi - distance_nmi
+    transition_end_nmi = min(180.0, route_distance_nmi / 2)
+    climb_end_nmi = transition_end_nmi * (2 / 3)
+    initial_climb_end_nmi = transition_end_nmi / 9
 
     def interpolate(start: float, end: float, fraction: float) -> float:
         return start + (end - start) * min(1.0, max(0.0, fraction))
 
-    if bounded < 0.06:
-        local = bounded / 0.06
+    if distance_nmi < initial_climb_end_nmi:
+        local = distance_nmi / initial_climb_end_nmi
         phase = "Takeoff / initial climb"
         mach = interpolate(0.20, 0.45, local)
         altitude_ft = interpolate(0, 10_000, local)
-    elif bounded < 0.16:
-        local = (bounded - 0.06) / 0.10
+    elif distance_nmi < climb_end_nmi:
+        local = (distance_nmi - initial_climb_end_nmi) / (
+            climb_end_nmi - initial_climb_end_nmi
+        )
         phase = "Climb"
         mach = interpolate(0.45, 0.78, local)
         altitude_ft = interpolate(10_000, 45_000, local)
-    elif bounded < 0.22:
-        local = (bounded - 0.16) / 0.06
+    elif distance_nmi < transition_end_nmi:
+        local = (distance_nmi - climb_end_nmi) / (transition_end_nmi - climb_end_nmi)
         phase = "Transonic acceleration"
         mach = interpolate(0.78, cruise_mach, local)
         altitude_ft = interpolate(45_000, cruise_altitude_ft, local)
-    elif bounded <= 0.78:
+    elif remaining_nmi >= transition_end_nmi:
         phase = "Supersonic cruise"
         mach = cruise_mach
         altitude_ft = cruise_altitude_ft
-    elif bounded <= 0.84:
-        local = (bounded - 0.78) / 0.06
+    elif remaining_nmi >= climb_end_nmi:
+        local = (transition_end_nmi - remaining_nmi) / (
+            transition_end_nmi - climb_end_nmi
+        )
         phase = "Supersonic deceleration"
         mach = interpolate(cruise_mach, 0.78, local)
         altitude_ft = interpolate(cruise_altitude_ft, 45_000, local)
-    elif bounded <= 0.94:
-        local = (bounded - 0.84) / 0.10
+    elif remaining_nmi >= initial_climb_end_nmi:
+        local = (climb_end_nmi - remaining_nmi) / (
+            climb_end_nmi - initial_climb_end_nmi
+        )
         phase = "Descent"
         mach = interpolate(0.78, 0.45, local)
         altitude_ft = interpolate(45_000, 10_000, local)
     else:
-        local = (bounded - 0.94) / 0.06
+        local = (initial_climb_end_nmi - remaining_nmi) / initial_climb_end_nmi
         phase = "Approach / landing"
         mach = interpolate(0.45, 0.20, local)
         altitude_ft = interpolate(10_000, 0, local)
