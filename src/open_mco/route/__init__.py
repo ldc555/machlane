@@ -15,6 +15,7 @@ from .missions import (
     get_mission,
     list_missions,
 )
+from .opensky import OpenSkyTrackProvider
 from .weather import (
     WeatherRegimeSummary,
     WeatherSegmentationSettings,
@@ -26,6 +27,7 @@ __all__ = [
     "AIRPORT_SOURCE_URL",
     "Airport",
     "MissionDefinition",
+    "OpenSkyTrackProvider",
     "WeatherRegimeSummary",
     "WeatherSegmentationSettings",
     "corridor_geojson",

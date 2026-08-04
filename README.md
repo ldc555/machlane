@@ -193,7 +193,7 @@ See [docs/SONIC_BOOM_PIPELINE.md](docs/SONIC_BOOM_PIPELINE.md).
 ### Routes and distance
 
 The UI ships with a small catalog of conceptual future high-speed missions: DFW–JFK, DFW–LAX,
-LAX–JFK, LAX–HNL, BOS–HNL, DFW–SJU, JFK–LHR, and DEN–NRT. Endpoints are real airport reference points
+LAX–JFK, BOS–HNL, DFW–SJU, JFK–LHR, and DEN–NRT. Endpoints are real airport reference points
 retrieved from the public-domain [OurAirports data dump](https://ourairports.com/data/) on
 2026-08-04. The points are committed as a reviewed subset so opening the UI never depends on a
 network request or a changing upstream file.
@@ -206,6 +206,20 @@ intentionally **not** described as a filed route,
 published airway, daily oceanic track, ATC clearance, or approved supersonic corridor. Current U.S.
 procedures can later be imported from the FAA's 28-day [CIFP product](https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/download/),
 but present-day subsonic procedures should not be passed off as future hypersonic routing.
+
+The opt-in OpenSky adapter can replace the displayed geodesic with one recent observed flight track.
+It searches departures for the selected airport pair, retrieves the latest matching experimental
+track, normalizes it to WGS-84 route geometry, and records the flight identity, observation window,
+source URL, limitations, and raw-response checksum. OpenSky tracks are downsampled observations with
+possible reception gaps; they are neither filed flight plans nor approved future supersonic routes.
+The UI never contacts OpenSky until the user enables the route source and presses **Fetch observed
+track**. OAuth client credentials come only from `OPENSKY_CLIENT_ID` and
+`OPENSKY_CLIENT_SECRET`; create them on the OpenSky account page and never commit them.
+
+OpenSky permits non-profit research/education under its agreement, while commercial or operational
+REST API use requires written permission. Every user is responsible for reviewing and complying with
+the current [OpenSky Terms of Use](https://opensky-network.org/about/terms-of-use). MachLane does not
+redistribute fetched OpenSky data in the repository.
 
 Coriolis is not an extra correction to geometric distance. Earth shape belongs in the WGS-84
 geodesic; Earth rotation and atmospheric dynamics belong in the forecast model and its wind field.
@@ -270,6 +284,7 @@ It is not a global ocean-floor or international terrain source.
 | NOAA GEFS | Implemented through Herbie, including member identity | Live `p01` pressure-profile fetch completed; common native levels only |
 | USGS 3DEP | Implemented through official USGS HTTPS services | Live route-profile fetch completed; no GIS installation required |
 | ERA5 | Implemented through the CDS API | Credential-gated; test double verified because no CDS credentials are stored in the repository |
+| OpenSky observed tracks | Implemented through OAuth2 REST endpoints | Credential-gated; experimental and limited to recent observations, never treated as a filed route |
 | NOAA RRFS/REFS | Not implemented | Track the [announced October 2026 production transition](https://www.weather.gov/notification/) |
 
 These statuses describe data ingestion only. No source in this table turns the mock propagation
@@ -508,6 +523,7 @@ open-mco demo
 open-mco plan --config configs/baseline.yml
 open-mco fetch-weather --provider hrrr|gefs|era5 ...
 open-mco fetch-terrain ...
+open-mco fetch-route --mission-id den_nrt --date YYYY-MM-DD
 open-mco export-pcboom RUN_ID
 open-mco report RUN_ID
 open-mco ui

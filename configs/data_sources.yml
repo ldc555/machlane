@@ -12,4 +12,8 @@ terrain:
   usgs_3dep:
     access: py3dep
     network_enabled: false
-
+routes:
+  opensky:
+    access: oauth2_rest
+    network_enabled: false
+    data_kind: observed_track

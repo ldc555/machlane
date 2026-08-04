@@ -107,14 +107,24 @@ def demo_route(
     return route_from_waypoints(waypoints, spacing_m=spacing_m, name="Imported research route")
 
 
-def build_demo_scenario(mission_id: str = "dfw_jfk") -> DemoScenario:
-    """Build the deterministic scenario once for any presentation or export surface."""
+def build_demo_scenario(
+    mission_id: str = "dfw_jfk", *, route_override: Route | None = None
+) -> DemoScenario:
+    """Build the deterministic scenario on a conceptual or explicitly imported route."""
 
     aircraft = synthetic_aircraft()
     weather = SyntheticAtmosphereProvider()
-    sampled_route = get_mission(mission_id).build_route(
-        spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M
-    )
+    if route_override is None:
+        sampled_route = get_mission(mission_id).build_route(
+            spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M
+        )
+    else:
+        sampled_route = route_from_waypoints(
+            route_override.waypoints,
+            spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M,
+            name=route_override.name,
+            source=route_override.source,
+        )
     route, weather_regimes = segment_route_by_weather(
         sampled_route,
         weather,

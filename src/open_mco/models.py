@@ -161,10 +161,30 @@ class RouteSegment(FrozenModel):
     bearing_deg: float
 
 
+class RouteSourceMetadata(FrozenModel):
+    """Provenance for conceptual, imported, or observed route geometry."""
+
+    provider: str
+    data_kind: Literal["conceptual_geodesic", "observed_track", "imported_waypoints"]
+    retrieved_at: datetime
+    source_url: str | None = None
+    label: str
+    flight_id: str | None = None
+    callsign: str | None = None
+    origin_icao: str | None = None
+    destination_icao: str | None = None
+    observed_start: datetime | None = None
+    observed_end: datetime | None = None
+    point_count: int | None = Field(default=None, ge=2)
+    checksum: str | None = None
+    limitations: tuple[str, ...] = ()
+
+
 class Route(FrozenModel):
     name: str
     waypoints: tuple[tuple[float, float], ...]
     segments: tuple[RouteSegment, ...]
+    source: RouteSourceMetadata | None = None
 
 
 class NearFieldSourceMetadata(FrozenModel):

@@ -8,10 +8,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import requests
 
 from open_mco.atmosphere import ERA5Provider, HerbieGEFSProvider, HerbieHRRRProvider
 from open_mco.demo import demo_route
-from open_mco.route import route_from_waypoints
+from open_mco.route import OpenSkyTrackProvider, get_mission, route_from_waypoints
 from open_mco.terrain import RasterTerrainProvider, USGS3DEPProvider
 from open_mco.validation import PCBoomAdapter
 
@@ -27,6 +28,114 @@ def test_terrain_adapters_validate_configuration(tmp_path: Path) -> None:
         USGS3DEPProvider().profile(demo_route().segments[0])
     with pytest.raises(FileNotFoundError):
         RasterTerrainProvider(tmp_path / "missing.tif")
+
+
+def test_opensky_adapter_does_not_call_network_by_default() -> None:
+    mission = get_mission("dfw_jfk")
+    provider = OpenSkyTrackProvider(client_id="client", client_secret="secret")
+    with pytest.raises(RuntimeError, match="disabled"):
+        provider.route_for_airports(
+            mission.origin,
+            mission.destination,
+            begin=datetime(2026, 8, 3, tzinfo=UTC),
+            end=datetime(2026, 8, 4, tzinfo=UTC),
+        )
+
+
+def test_opensky_adapter_imports_latest_matching_observed_track(monkeypatch) -> None:
+    monkeypatch.delenv("MACHLANE_NETWORK_DISABLED", raising=False)
+
+    class FakeResponse:
+        def __init__(self, payload, status_code: int = 200) -> None:
+            self.payload = payload
+            self.status_code = status_code
+            self.headers: dict[str, str] = {}
+
+        def json(self):
+            return self.payload
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.get_calls: list[tuple[str, dict[str, str | int], dict[str, str]]] = []
+
+        def post(self, url, *, data, timeout):
+            assert data["client_id"] == "client"
+            assert data["client_secret"] == "secret"
+            assert timeout == 30
+            return FakeResponse({"access_token": "token", "expires_in": 1800})
+
+        def get(self, url, *, params, headers, timeout):
+            self.get_calls.append((url, params, headers))
+            assert headers["Authorization"] == "Bearer token"
+            if url.endswith("/flights/departure"):
+                return FakeResponse(
+                    [
+                        {
+                            "icao24": "abc123",
+                            "callsign": "OLD1",
+                            "firstSeen": 1_754_179_200,
+                            "lastSeen": 1_754_208_000,
+                            "estArrivalAirport": "KJFK",
+                        },
+                        {
+                            "icao24": "def456",
+                            "callsign": "TEST42 ",
+                            "firstSeen": 1_754_265_600,
+                            "lastSeen": 1_754_294_400,
+                            "estArrivalAirport": "KJFK",
+                        },
+                        {
+                            "icao24": "ffffff",
+                            "firstSeen": 1_754_265_600,
+                            "lastSeen": 1_754_294_400,
+                            "estArrivalAirport": "KBOS",
+                        },
+                    ]
+                )
+            assert url.endswith("/tracks/all")
+            assert params["icao24"] == "def456"
+            return FakeResponse(
+                {
+                    "icao24": "def456",
+                    "callsign": "TEST42 ",
+                    "startTime": 1_754_265_600,
+                    "endTime": 1_754_294_400,
+                    "path": [
+                        [1_754_265_600, 32.90, -97.04, 0, 0, True],
+                        [1_754_266_000, 33.10, -96.70, 5_000, 65, False],
+                        [1_754_270_000, 36.50, -88.00, 11_000, 70, False],
+                        [1_754_294_000, 40.60, -73.80, 2_000, 75, False],
+                    ],
+                }
+            )
+
+    session = FakeSession()
+    mission = get_mission("dfw_jfk")
+    provider = OpenSkyTrackProvider(
+        network_enabled=True,
+        client_id="client",
+        client_secret="secret",
+        session=session,  # type: ignore[arg-type]
+    )
+    route = provider.route_for_airports(
+        mission.origin,
+        mission.destination,
+        begin=datetime(2026, 8, 3, tzinfo=UTC),
+        end=datetime(2026, 8, 4, tzinfo=UTC),
+    )
+
+    assert route.waypoints == ((33.1, -96.7), (36.5, -88.0), (40.6, -73.8))
+    assert route.source is not None
+    assert route.source.data_kind == "observed_track"
+    assert route.source.callsign == "TEST42"
+    assert route.source.flight_id == "def456:1754265600"
+    assert route.source.point_count == 3
+    assert route.source.checksum
+    assert len(session.get_calls) == 2
 
 
 def test_hrrr_adapter_extracts_and_labels_real_pressure_profile(
@@ -193,6 +302,16 @@ def test_live_adapters_honor_network_kill_switch(monkeypatch) -> None:
         ERA5Provider(network_enabled=True).profile(39, -98, datetime.now(UTC))
     with pytest.raises(RuntimeError, match="MACHLANE_NETWORK_DISABLED"):
         USGS3DEPProvider(network_enabled=True).profile(demo_route().segments[0])
+    mission = get_mission("dfw_jfk")
+    with pytest.raises(RuntimeError, match="MACHLANE_NETWORK_DISABLED"):
+        OpenSkyTrackProvider(
+            network_enabled=True, client_id="client", client_secret="secret"
+        ).route_for_airports(
+            mission.origin,
+            mission.destination,
+            begin=datetime(2026, 8, 3, tzinfo=UTC),
+            end=datetime(2026, 8, 4, tzinfo=UTC),
+        )
 
 
 def test_pcboom_offline_exchange_and_comparison(tmp_path: Path) -> None:

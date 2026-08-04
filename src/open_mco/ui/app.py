@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -14,9 +16,11 @@ import streamlit as st
 
 from open_mco.compliance import compliance_matrix
 from open_mco.demo import build_demo_scenario, run_demo
+from open_mco.models import Route
 from open_mco.route import (
     AIRPORT_SOURCE_RETRIEVED,
     AIRPORT_SOURCE_URL,
+    OpenSkyTrackProvider,
     get_mission,
     interpolate_position,
     list_missions,
@@ -119,15 +123,16 @@ h1,h2,h3 { letter-spacing:-.02em; }
 )
 
 
-SCENARIO_CACHE_SCHEMA = "weather-regimes-v1"
+SCENARIO_CACHE_SCHEMA = "weather-regimes-v2-route-source"
 
 
 @st.cache_resource(show_spinner=False)
-def scenario(mission_id: str, cache_schema: str):
+def scenario(mission_id: str, cache_schema: str, route_json: str | None = None):
     """Cache by mission and result schema so old objects cannot survive model changes."""
 
     del cache_schema
-    return build_demo_scenario(mission_id)
+    route_override = None if route_json is None else Route.model_validate_json(route_json)
+    return build_demo_scenario(mission_id, route_override=route_override)
 
 st.markdown(
     """
@@ -166,7 +171,75 @@ mission_id = st.selectbox(
     help="Real airport reference points connected by the shortest WGS-84 geodesic. These are concept missions, not filed or cleared routes.",
 )
 mission = get_mission(mission_id)
-demo = scenario(mission_id, SCENARIO_CACHE_SCHEMA)
+
+with st.container(border=True):
+    source_control, source_date, source_action = st.columns(
+        [2.1, 1.2, 1.25], vertical_alignment="bottom"
+    )
+    with source_control:
+        use_opensky = st.toggle(
+            "Use an observed OpenSky track",
+            value=False,
+            key="use_opensky_route",
+            help="Explicitly fetches one recent observed trajectory. OpenSky tracks are experimental and are not filed routes.",
+        )
+    yesterday = datetime.now(UTC).date() - timedelta(days=1)
+    with source_date:
+        observed_date = st.date_input(
+            "Departure date (UTC)",
+            value=yesterday,
+            min_value=yesterday - timedelta(days=29),
+            max_value=yesterday,
+            disabled=not use_opensky,
+            key="opensky_observed_date",
+        )
+    credentials_configured = bool(
+        os.getenv("OPENSKY_CLIENT_ID") and os.getenv("OPENSKY_CLIENT_SECRET")
+    )
+    with source_action:
+        fetch_opensky = st.button(
+            "Fetch observed track",
+            disabled=not use_opensky or not credentials_configured,
+            width="stretch",
+        )
+
+    opensky_key = f"opensky-route:{mission_id}"
+    if fetch_opensky:
+        begin = datetime.combine(observed_date, datetime.min.time(), tzinfo=UTC)
+        end = begin + timedelta(days=1) - timedelta(seconds=1)
+        try:
+            with st.spinner("Finding a matching OpenSky flight and observed track…"):
+                fetched_route = OpenSkyTrackProvider(network_enabled=True).route_for_airports(
+                    mission.origin,
+                    mission.destination,
+                    begin=begin,
+                    end=end,
+                )
+            st.session_state[opensky_key] = fetched_route.model_dump_json()
+        except (RuntimeError, ValueError, OSError) as exc:
+            st.error(f"OpenSky import failed: {exc}")
+
+    observed_route_json = st.session_state.get(opensky_key) if use_opensky else None
+    if use_opensky and not credentials_configured:
+        st.warning(
+            "OpenSky is ready but not configured. Create an API client, export "
+            "OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET, then restart Streamlit."
+        )
+    elif use_opensky and observed_route_json is None:
+        st.caption(
+            "No observed track loaded yet. The conceptual geodesic remains active until Fetch succeeds."
+        )
+    if use_opensky:
+        st.caption(
+            "Research use only · OpenSky commercial or operational API use requires permission. "
+            "[Terms](https://opensky-network.org/about/terms-of-use)"
+        )
+
+demo = scenario(mission_id, SCENARIO_CACHE_SCHEMA, observed_route_json)
+observed_route = (
+    None if observed_route_json is None else Route.model_validate_json(observed_route_json)
+)
+display_route = observed_route or demo.route
 rows = segment_rows(demo.route, demo.result)
 regime_by_id = {regime.segment_id: regime for regime in demo.weather_regimes}
 segment_palette = (
@@ -193,18 +266,38 @@ for index, row in enumerate(rows):
 corridors = corridor_rows(demo.route, demo.result)
 for index, corridor in enumerate(corridors):
     corridor["color"] = [*segment_palette[index % len(segment_palette)][:3], 48]
-distance_km = route_distance_m(demo.route) / 1000
+distance_km = route_distance_m(display_route) / 1000
 distance_nmi = distance_km / 1.852
-map_latitude, map_longitude = interpolate_position(demo.route, 0.5)
+map_latitude, map_longitude = interpolate_position(display_route, 0.5)
 map_zoom = max(1.2, min(4.0, 4.9 - math.log2(max(distance_km, 500) / 500)))
 
-st.caption(
-    f"{mission.rationale} Real endpoints from OurAirports; path is conceptual, not an ATC clearance."
-)
+if observed_route is None:
+    st.caption(
+        f"{mission.rationale} Real endpoints from OurAirports; path is conceptual, not an ATC clearance."
+    )
+else:
+    observed_source = observed_route.source
+    callsign = observed_source.callsign if observed_source and observed_source.callsign else "unknown"
+    observed_day = (
+        observed_source.observed_start.strftime("%Y-%m-%d")
+        if observed_source and observed_source.observed_start
+        else str(observed_date)
+    )
+    st.caption(
+        f"Observed OpenSky trajectory · {callsign} · {observed_day} · "
+        "experimental/downsampled, not a filed route or future supersonic approval."
+    )
 
 summary_columns = st.columns(4)
 summary_columns[0].metric(
-    "Route distance", f"{distance_nmi:,.0f} nmi", f"{distance_km:,.0f} km", delta_color="off"
+    "Route distance",
+    f"{distance_nmi:,.0f} nmi",
+    (
+        f"OpenSky observed · {len(display_route.waypoints)} points"
+        if observed_route is not None
+        else f"{distance_km:,.0f} km · conceptual"
+    ),
+    delta_color="off",
 )
 summary_columns[1].metric(
     "Weather segments",
@@ -296,6 +389,25 @@ static_map_layers = [
         get_color=[226, 236, 246, 230],
     ),
 ]
+if observed_route is not None:
+    static_map_layers.insert(
+        2,
+        pdk.Layer(
+            "PathLayer",
+            [
+                {
+                    "path": [
+                        [display_longitude(longitude, map_longitude), latitude]
+                        for latitude, longitude in observed_route.waypoints
+                    ]
+                }
+            ],
+            id="opensky-observed-track",
+            get_path="path",
+            get_color=[255, 213, 0, 235],
+            width_min_pixels=4,
+        ),
+    )
 
 
 @fragment
@@ -315,7 +427,7 @@ def render_workspace() -> None:
         drag_progress = percent / 100
         drag_index = active_segment_index(demo.route, drag_progress)
         drag_row = rows[drag_index]
-        aircraft = aircraft_view(demo.route, drag_progress, map_longitude)
+        aircraft = aircraft_view(display_route, drag_progress, map_longitude)
         drag_weather = atmosphere_metrics(
             demo.segment_atmospheres[drag_index],
             demo.result.segment_limits[drag_index].selected_altitude_m or 0.0,
@@ -352,7 +464,7 @@ def render_workspace() -> None:
                 unsafe_allow_html=True,
             )
         st.markdown(
-            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Mock SST</b></span><span>Atmosphere <b>{"MOCK HRRR / GEFS" if mock_mode else "Synthetic"}</b></span><span>Terrain <b>{"MOCK 3DEP" if mock_mode else "Flat"}</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
+            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Geometry <b>{"OpenSky observed" if observed_route is not None else "Concept geodesic"}</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Mock SST</b></span><span>Atmosphere <b>{"MOCK HRRR / GEFS" if mock_mode else "Synthetic"}</b></span><span>Terrain <b>{"MOCK 3DEP" if mock_mode else "Flat"}</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
             unsafe_allow_html=True,
         )
 
@@ -415,7 +527,11 @@ def render_workspace() -> None:
         )
         legend_left, legend_right = st.columns([2, 1])
         with legend_left:
-            st.caption("Colored sections: internally uniform synthetic weather regimes")
+            st.caption(
+                "Yellow centerline: observed OpenSky track · colored sections: synthetic weather regimes"
+                if observed_route is not None
+                else "Colored sections: internally uniform synthetic weather regimes"
+            )
         with legend_right:
             st.caption(f"{drag_progress:.0%} complete · {drag_row['segment']}")
 

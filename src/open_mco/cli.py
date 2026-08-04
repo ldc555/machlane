@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import typer
@@ -20,7 +20,7 @@ from open_mco.atmosphere import (
 )
 from open_mco.demo import run_demo
 from open_mco.physics import assess_boom_readiness
-from open_mco.route import route_from_waypoints
+from open_mco.route import OpenSkyTrackProvider, get_mission, route_from_waypoints
 from open_mco.terrain import USGS3DEPProvider
 from open_mco.validation import PCBoomAdapter, SU2NearFieldAdapter
 
@@ -157,6 +157,45 @@ def fetch_terrain(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(terrain.model_dump_json(indent=2), encoding="utf-8")
     typer.echo(f"Wrote USGS 3DEP profile with {len(terrain.distance_m)} samples to {output}")
+
+
+@app.command("fetch-route")
+def fetch_route(
+    mission_id: str = typer.Option("dfw_jfk", help="Curated mission identifier."),
+    observed_date: datetime = typer.Option(
+        ...,
+        "--date",
+        formats=["%Y-%m-%d"],
+        help="UTC departure date within OpenSky's recent-track window.",
+    ),
+    output: Path = typer.Option(Path("data/processed/opensky_route.json")),
+) -> None:
+    """Fetch one recent observed OpenSky trajectory using OAuth credentials from the environment."""
+
+    try:
+        mission = get_mission(mission_id)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--mission-id") from exc
+    begin = observed_date.replace(tzinfo=UTC)
+    end = begin + timedelta(days=1) - timedelta(seconds=1)
+    provider = OpenSkyTrackProvider(network_enabled=True)
+    try:
+        route = provider.route_for_airports(
+            mission.origin,
+            mission.destination,
+            begin=begin,
+            end=end,
+        )
+    except (RuntimeError, ValueError, OSError) as exc:
+        typer.echo(f"OpenSky route fetch failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(route.model_dump_json(indent=2), encoding="utf-8")
+    source = route.source
+    typer.echo(
+        f"Wrote {len(route.waypoints)} OpenSky waypoints for "
+        f"{source.callsign if source and source.callsign else mission.label} to {output}"
+    )
 
 
 @app.command("export-pcboom")

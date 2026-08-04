@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 
-from open_mco.models import Route
+from open_mco.models import Route, RouteSourceMetadata
 
 from .geometry import route_from_waypoints
 
@@ -68,6 +69,20 @@ class MissionDefinition:
             ],
             spacing_m=spacing_m,
             name=f"{self.label} conceptual geodesic mission",
+            source=RouteSourceMetadata(
+                provider="OurAirports + pyproj.Geod",
+                data_kind="conceptual_geodesic",
+                retrieved_at=datetime.fromisoformat(AIRPORT_SOURCE_RETRIEVED).replace(tzinfo=UTC),
+                source_url=AIRPORT_SOURCE_URL,
+                label="CONCEPTUAL_GEODESIC_NOT_A_FILED_OR_OBSERVED_ROUTE",
+                origin_icao=self.origin.icao,
+                destination_icao=self.destination.icao,
+                point_count=2,
+                limitations=(
+                    "Shortest WGS-84 geodesic between airport reference points.",
+                    "Not a filed route, ATC clearance, or observed aircraft trajectory.",
+                ),
+            ),
         )
 
 

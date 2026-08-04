@@ -167,6 +167,7 @@ def segment_route_by_weather(
         boundaries,
         spacing_m=50_000_000,
         name=f"{sampled_route.name} · weather-regime segmentation",
+        source=sampled_route.source,
     )
     summaries = tuple(
         WeatherRegimeSummary(

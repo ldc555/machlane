@@ -61,6 +61,9 @@ def test_mission_catalog_uses_real_endpoints_and_wgs84_distance() -> None:
     route = get_mission("dfw_jfk").build_route()
     assert route.waypoints == ((32.896801, -97.038002), (40.639447, -73.779317))
     assert route_distance_m(route) / 1000 == pytest.approx(2235, rel=0.01)
+    assert route.source is not None
+    assert route.source.data_kind == "conceptual_geodesic"
+    assert "NOT_A_FILED_OR_OBSERVED_ROUTE" in route.source.label
 
 
 def test_pacific_mission_takes_short_antimeridian_path() -> None:
