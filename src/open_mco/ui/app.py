@@ -19,7 +19,14 @@ from open_mco.route import (
     list_missions,
     route_distance_m,
 )
-from open_mco.ui.view_model import active_segment_index, corridor_rows, segment_rows
+from open_mco.ui.view_model import (
+    METERS_TO_FEET,
+    active_segment_index,
+    atmosphere_metrics,
+    corridor_rows,
+    display_longitude,
+    segment_rows,
+)
 
 st.set_page_config(
     page_title="MachLane · Mission workspace",
@@ -53,6 +60,11 @@ h1,h2,h3 { letter-spacing:-.02em; }
 .status-card .label { color:#70879e; font-size:.68rem; letter-spacing:.1em; text-transform:uppercase; }
 .status-card .value { color:#e7f8f5; font-size:1.15rem; font-weight:750; margin:.15rem 0; }
 .status-card .meta { color:#8ba0b7; font-size:.74rem; }
+.calc-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:.55rem; margin:.4rem 0 .8rem; }
+.calc-step { border:1px solid var(--line); background:#0d1722; border-radius:.65rem; padding:.75rem; min-height:7rem; }
+.calc-step .number { color:var(--teal); font:700 .68rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.1em; }
+.calc-step b { display:block; color:#e5eef8; margin:.45rem 0 .25rem; font-size:.85rem; }
+.calc-step span { color:#8ba0b7; font-size:.73rem; line-height:1.4; }
 .eligible { display:inline-block; padding:.24rem .46rem; color:#8ff5e8; background:#123c3a; border:1px solid #1c716a; border-radius:99px; font:700 .66rem/1 ui-monospace,SFMono-Regular,monospace; }
 .pending { display:inline-block; padding:.24rem .46rem; color:#ffd38a; background:#3a2b16; border:1px solid #795a28; border-radius:99px; font:700 .66rem/1 ui-monospace,SFMono-Regular,monospace; }
 [data-testid="stMetric"] { background:#0d1722; border:1px solid var(--line); padding:.65rem .75rem; border-radius:.6rem; }
@@ -63,7 +75,7 @@ h1,h2,h3 { letter-spacing:-.02em; }
 .stTabs [data-baseweb="tab"] { color:#8da2b7; height:2.7rem; }
 .stTabs [aria-selected="true"] { color:#eaf5ff; }
 .stButton button { border:1px solid #2f6e69; background:#123a38; color:#d8fffa; }
-@media (max-width:900px) { .workflow { grid-template-columns:repeat(3,1fr); } .block-container { padding:.8rem; } }
+@media (max-width:900px) { .workflow,.calc-grid { grid-template-columns:repeat(2,1fr); } .block-container { padding:.8rem; } }
 </style>
 """,
     unsafe_allow_html=True,
@@ -97,11 +109,26 @@ mission = get_mission(mission_id)
 demo = scenario(mission_id)
 rows = segment_rows(demo.route, demo.result)
 distance_km = route_distance_m(demo.route) / 1000
+distance_nmi = distance_km / 1.852
 map_latitude, map_longitude = interpolate_position(demo.route, 0.5)
 map_zoom = max(1.2, min(4.0, 4.9 - math.log2(max(distance_km, 500) / 500)))
 
 st.caption(
     f"{mission.rationale} Real endpoints from OurAirports; path is conceptual, not an ATC clearance."
+)
+
+summary_columns = st.columns(4)
+summary_columns[0].metric(
+    "Route distance", f"{distance_nmi:,.0f} nmi", f"{distance_km:,.0f} km", delta_color="off"
+)
+summary_columns[1].metric(
+    "Analysis segments", f"{len(demo.route.segments)}", "≈108 nmi each", delta_color="off"
+)
+summary_columns[2].metric(
+    "Weather input", "Synthetic", "Live NOAA not connected", delta_color="off"
+)
+summary_columns[3].metric(
+    "Boom output", "Not modeled", "No ground overpressure", delta_color="off"
 )
 
 workspace, inspector = st.columns([3.15, 1], gap="medium")
@@ -113,6 +140,12 @@ with workspace:
 active_index = active_segment_index(demo.route, progress)
 active = rows[active_index]
 aircraft_lat, aircraft_lon = interpolate_position(demo.route, progress)
+aircraft_display_lon = display_longitude(aircraft_lon, map_longitude)
+active_limit = demo.result.segment_limits[active_index]
+active_altitude_m = active_limit.selected_altitude_m or 0.0
+weather_at_altitude = atmosphere_metrics(
+    demo.atmosphere, active_altitude_m, float(active["bearing_deg"])
+)
 
 with workspace:
     title_left, title_right = st.columns([3, 1])
@@ -125,7 +158,7 @@ with workspace:
             unsafe_allow_html=True,
         )
     st.markdown(
-        f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_km:,.0f} km</b></span><span>Geometry <b>WGS-84 geodesic</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
+        f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Geometry <b>WGS-84 geodesic</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
         unsafe_allow_html=True,
     )
 
@@ -149,7 +182,10 @@ with workspace:
         ),
         pdk.Layer(
             "ScatterplotLayer",
-            [{"position": [lon, lat]} for lat, lon in demo.route.waypoints],
+            [
+                {"position": [display_longitude(lon, map_longitude), lat]}
+                for lat, lon in demo.route.waypoints
+            ],
             get_position="position",
             get_radius=2700,
             get_fill_color=[226, 236, 246, 220],
@@ -161,11 +197,17 @@ with workspace:
             "TextLayer",
             [
                 {
-                    "position": [mission.origin.longitude, mission.origin.latitude],
+                    "position": [
+                        display_longitude(mission.origin.longitude, map_longitude),
+                        mission.origin.latitude,
+                    ],
                     "label": mission.origin.iata,
                 },
                 {
-                    "position": [mission.destination.longitude, mission.destination.latitude],
+                    "position": [
+                        display_longitude(mission.destination.longitude, map_longitude),
+                        mission.destination.latitude,
+                    ],
                     "label": mission.destination.iata,
                 },
             ],
@@ -177,7 +219,7 @@ with workspace:
         ),
         pdk.Layer(
             "ScatterplotLayer",
-            [{"position": [aircraft_lon, aircraft_lat]}],
+            [{"position": [aircraft_display_lon, aircraft_lat]}],
             get_position="position",
             get_radius=5200,
             get_fill_color=[255, 255, 255, 245],
@@ -187,7 +229,7 @@ with workspace:
         ),
         pdk.Layer(
             "TextLayer",
-            [{"position": [aircraft_lon, aircraft_lat], "label": ">"}],
+            [{"position": [aircraft_display_lon, aircraft_lat], "label": ">"}],
             get_position="position",
             get_text="label",
             get_size=20,
@@ -222,11 +264,7 @@ with workspace:
 with inspector:
     st.markdown('<div class="section-kicker">Live inspector</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="status-card"><div class="label">Active segment</div><div class="value">{active["segment"]}</div><div class="meta">{active["start_km"]:.1f}–{active["end_km"]:.1f} km · {active["bearing_deg"]:.0f}°</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="status-card"><div class="label">Route geometry</div><div class="value">{distance_km:,.0f} km</div><div class="meta">{distance_km / 1.852:,.0f} nmi · WGS-84 ellipsoid</div></div>',
+        f'<div class="status-card"><div class="label">Active segment</div><div class="value">{active["segment"]}</div><div class="meta">{active["start_nmi"]:.1f}–{active["end_nmi"]:.1f} nmi · track {active["bearing_deg"]:.0f}°</div></div>',
         unsafe_allow_html=True,
     )
     st.markdown(
@@ -234,92 +272,185 @@ with inspector:
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<div class="status-card"><div class="label">Decision</div><div class="value"><span class="eligible">SYNTHETIC ELIGIBLE</span></div><div class="meta">Mock-engine integration result only</div></div>',
+        f'<div class="status-card"><div class="label">Ambient profile</div><div class="value">{weather_at_altitude["pressure_hpa"]:.0f} hPa</div><div class="meta">{weather_at_altitude["temperature_c"]:.1f} °C · wind {weather_at_altitude["wind_speed_kt"]:.0f} kt · synthetic</div></div>',
         unsafe_allow_html=True,
     )
     st.markdown(
         '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT MODELED</span></div><div class="meta">No 0.11 psf determination</div></div>',
         unsafe_allow_html=True,
     )
-    st.markdown(
-        '<div class="status-card"><div class="label">Fuel / trip time</div><div class="value"><span class="pending">NOT MODELED</span></div><div class="meta">Requires validated performance data and segment winds</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="status-card"><div class="label">PCBoom validation</div><div class="value"><span class="pending">PENDING</span></div><div class="meta">External adapter available · no run imported</div></div>',
-        unsafe_allow_html=True,
-    )
     st.caption(
         f"{active['accepted_candidates']} of {active['total_candidates']} grid candidates accepted by the mock boundary."
     )
 
-plan_tab, engineering_tab, evidence_tab = st.tabs(["Segment plan", "Engineering", "Evidence"])
+plan_tab, atmosphere_tab, model_tab, evidence_tab = st.tabs(
+    ["Flight plan", "Atmosphere", "How it works", "Evidence"]
+)
 
 with plan_tab:
-    table = pd.DataFrame(rows).drop(columns=["path", "color"])
+    table = pd.DataFrame(rows)
     st.dataframe(
         table,
         hide_index=True,
         width="stretch",
-        column_order=["segment", "start_km", "end_km", "altitude_ft", "mach", "decision", "boom"],
+        column_order=[
+            "segment",
+            "start_nmi",
+            "end_nmi",
+            "altitude_ft",
+            "mach",
+            "along_wind_kt",
+            "decision",
+            "boom",
+        ],
         column_config={
             "segment": "Segment",
-            "start_km": st.column_config.NumberColumn("From km", format="%.1f"),
-            "end_km": st.column_config.NumberColumn("To km", format="%.1f"),
+            "start_nmi": st.column_config.NumberColumn("From nmi", format="%.1f"),
+            "end_nmi": st.column_config.NumberColumn("To nmi", format="%.1f"),
             "altitude_ft": st.column_config.NumberColumn("Altitude", format="%d ft"),
             "mach": st.column_config.NumberColumn("Mach", format="%.2f"),
+            "along_wind_kt": st.column_config.NumberColumn("Along wind", format="%.1f kt"),
             "decision": "Planning result",
             "boom": "Surface boom",
         },
     )
 
-with engineering_tab:
+with atmosphere_tab:
+    weather_columns = st.columns(4)
+    weather_columns[0].metric("Ambient pressure", f'{weather_at_altitude["pressure_hpa"]:.0f} hPa')
+    weather_columns[1].metric("Temperature", f'{weather_at_altitude["temperature_c"]:.1f} °C')
+    weather_columns[2].metric("Wind speed", f'{weather_at_altitude["wind_speed_kt"]:.0f} kt')
+    weather_columns[3].metric("Along-track wind", f'{weather_at_altitude["along_wind_kt"]:+.0f} kt')
+
     chart_left, chart_right = st.columns(2)
-    distance = [row["end_km"] for row in rows]
+    altitude_ft = [altitude * METERS_TO_FEET for altitude in demo.atmosphere.altitude_m]
+    pressure_hpa = [pressure / 100 for pressure in demo.atmosphere.pressure_pa]
+    temperature_c = [temperature - 273.15 for temperature in demo.atmosphere.temperature_k]
+    wind_speed_kt = [
+        math.hypot(u, v) * 1.943844492
+        for u, v in zip(
+            demo.atmosphere.zonal_wind_mps,
+            demo.atmosphere.meridional_wind_mps,
+            strict=True,
+        )
+    ]
     with chart_left:
-        route_figure = go.Figure()
-        route_figure.add_trace(
+        pressure_figure = go.Figure()
+        pressure_figure.add_trace(
             go.Scatter(
-                x=distance,
-                y=[row["mach"] for row in rows],
-                name="Selected Mach",
-                line={"color": "#2dd4bf", "width": 3},
-            )
-        )
-        route_figure.update_layout(
-            title="Synthetic segment plan",
-            xaxis_title="Route distance (km)",
-            yaxis_title="Mach",
-            template="plotly_dark",
-            height=340,
-            margin={"l": 20, "r": 15, "t": 50, "b": 20},
-            paper_bgcolor="#0a111b",
-            plot_bgcolor="#0d1722",
-        )
-        st.plotly_chart(route_figure, width="stretch")
-    with chart_right:
-        atmosphere_figure = go.Figure(
-            go.Scatter(
-                x=demo.atmosphere.temperature_k,
-                y=[altitude * 3.28084 for altitude in demo.atmosphere.altitude_m],
+                x=pressure_hpa,
+                y=altitude_ft,
+                name="Ambient pressure",
                 mode="lines+markers",
                 line={"color": "#60a5fa", "width": 3},
-                marker={"size": 5},
+                fill="tozerox",
+                fillcolor="rgba(96,165,250,.10)",
             )
         )
-        atmosphere_figure.update_layout(
-            title="Synthetic atmosphere",
-            xaxis_title="Temperature (K)",
+        pressure_figure.add_trace(
+            go.Scatter(
+                x=[weather_at_altitude["pressure_hpa"]],
+                y=[active_altitude_m * METERS_TO_FEET],
+                name="Selected altitude",
+                mode="markers",
+                marker={"color": "#fbbf24", "size": 11},
+            )
+        )
+        pressure_figure.update_layout(
+            title="Ambient pressure profile · synthetic",
+            xaxis_title="Pressure (hPa)",
             yaxis_title="Altitude (ft)",
             template="plotly_dark",
-            height=340,
+            height=380,
             margin={"l": 20, "r": 15, "t": 50, "b": 20},
             paper_bgcolor="#0a111b",
             plot_bgcolor="#0d1722",
         )
-        st.plotly_chart(atmosphere_figure, width="stretch")
+        st.plotly_chart(pressure_figure, width="stretch")
+    with chart_right:
+        wind_figure = go.Figure(
+            go.Scatter(
+                x=wind_speed_kt,
+                y=altitude_ft,
+                mode="lines+markers",
+                line={"color": "#2dd4bf", "width": 3},
+                marker={"size": 5},
+                fill="tozerox",
+                fillcolor="rgba(45,212,191,.10)",
+            )
+        )
+        wind_figure.update_layout(
+            title="Wind profile · synthetic",
+            xaxis_title="Wind speed (kt)",
+            yaxis_title="Altitude (ft)",
+            template="plotly_dark",
+            height=380,
+            margin={"l": 20, "r": 15, "t": 50, "b": 20},
+            paper_bgcolor="#0a111b",
+            plot_bgcolor="#0d1722",
+        )
+        st.plotly_chart(wind_figure, width="stretch")
+    st.warning(
+        "Ambient pressure describes the surrounding atmosphere. Sonic-boom overpressure is a separate pressure disturbance and is not calculated here."
+    )
+    with st.expander("View profile values"):
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "Altitude (ft)": [round(value) for value in altitude_ft],
+                    "Pressure (hPa)": [round(value, 1) for value in pressure_hpa],
+                    "Temperature (°C)": [round(value, 1) for value in temperature_c],
+                    "Wind (kt)": [round(value, 1) for value in wind_speed_kt],
+                }
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+
+with model_tab:
+    st.markdown("#### What MachLane calculates today")
+    st.markdown(
+        """
+<div class="calc-grid">
+  <div class="calc-step"><span class="number">01</span><b>Route geometry</b><span>WGS-84 distance, track bearing, and position along the selected mission.</span></div>
+  <div class="calc-step"><span class="number">02</span><b>Atmospheric state</b><span>Ambient pressure, temperature, and wind interpolated to each candidate altitude.</span></div>
+  <div class="calc-step"><span class="number">03</span><b>Mock cutoff score</b><span>An arbitrary software-test boundary using altitude, along-track wind, and terrain.</span></div>
+  <div class="calc-step"><span class="number">04</span><b>Boom result</b><span>Not calculated: no pressure signature, ground overpressure, footprint, or loudness.</span></div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    equation_left, equation_right = st.columns([1.35, 1])
+    with equation_left:
+        st.markdown("##### Exact mock equation currently running")
+        st.code(
+            "synthetic_limit = 1.08\n"
+            "  + clamp(altitude_m - 10,000, 0, 8,000) / 200,000\n"
+            "  + along_track_wind_mps / 2,000\n"
+            "  - terrain_peak_m / 200,000\n\n"
+            "candidate accepted when Mach <= synthetic_limit",
+            language="text",
+        )
+        st.caption(
+            "This equation is intentionally arbitrary. It tests data flow and UI behavior; it is not sonic-boom physics."
+        )
+    with equation_right:
+        st.markdown("##### Active-segment variables")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Variable": "Candidate Mach", "Value": f'{active["mach"]:.2f}'},
+                    {"Variable": "Altitude", "Value": f'{active["altitude_ft"]:,} ft'},
+                    {"Variable": "Along-track wind", "Value": f'{active["along_wind_kt"]:+.1f} kt'},
+                    {"Variable": "Synthetic limit", "Value": f'{active["synthetic_score"]:.3f}'},
+                    {"Variable": "Surface overpressure", "Value": "NOT MODELED"},
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
     st.info(
-        "Effective sound speed, ray paths, boom footprint, and absolute overpressure remain unavailable until cited and validated physics is implemented."
+        "A real boom calculation still needs a reviewed aircraft near-field pressure signature, atmospheric propagation, nonlinear distortion and absorption, terrain interaction, ground metrics, and validation against a trusted reference such as PCBoom."
     )
 
 with evidence_tab:

@@ -367,8 +367,10 @@ open-mco demo
 ### Open the user interface
 
 The map-first workspace keeps the synthetic aircraft, route corridor, active-segment recommendation,
-engineering plots, validation state, provenance, and evidence generation in one screen. Moving the
-aircraft updates the inspector without recomputing the cached route plan.
+atmospheric profile, model explanation, validation state, provenance, and evidence generation in one
+screen. Aviation distances are displayed primarily in nautical miles. Pacific missions are unwrapped
+around the antimeridian for one continuous map path. Moving the aircraft updates the inspector without
+recomputing the cached route plan.
 
 ```bash
 open-mco ui

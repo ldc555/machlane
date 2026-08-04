@@ -2,18 +2,44 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from open_mco.models import PlannerResult, Route
-from open_mco.route import corridor_geojson
+import numpy as np
+
+from open_mco.atmosphere import project_wind_onto_bearing
+from open_mco.models import AtmosphericProfile, PlannerResult, Route
+from open_mco.route import corridor_geojson, interpolate_position
 
 METERS_TO_FEET = 3.280839895
+METERS_TO_NAUTICAL_MILES = 1 / 1852
+METERS_PER_SECOND_TO_KNOTS = 1.943844492
 
 
-def _unwrap_longitude(longitude: float, reference: float) -> float:
+def display_longitude(longitude: float, reference: float) -> float:
     """Keep a displayed longitude within one half-world of a local reference."""
 
     return reference + ((longitude - reference + 180) % 360) - 180
+
+
+def atmosphere_metrics(
+    profile: AtmosphericProfile, altitude_m: float, bearing_deg: float
+) -> dict[str, float]:
+    """Interpolate the visible atmospheric variables at one candidate altitude."""
+
+    temperature_k = float(np.interp(altitude_m, profile.altitude_m, profile.temperature_k))
+    pressure_pa = float(np.interp(altitude_m, profile.altitude_m, profile.pressure_pa))
+    zonal_mps = float(np.interp(altitude_m, profile.altitude_m, profile.zonal_wind_mps))
+    meridional_mps = float(np.interp(altitude_m, profile.altitude_m, profile.meridional_wind_mps))
+    return {
+        "temperature_c": temperature_k - 273.15,
+        "pressure_hpa": pressure_pa / 100,
+        "wind_speed_kt": math.hypot(zonal_mps, meridional_mps) * METERS_PER_SECOND_TO_KNOTS,
+        "along_wind_kt": project_wind_onto_bearing(
+            zonal_mps, meridional_mps, bearing_deg
+        )
+        * METERS_PER_SECOND_TO_KNOTS,
+    }
 
 
 def active_segment_index(route: Route, progress: float) -> int:
@@ -34,19 +60,37 @@ def segment_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     cumulative_m = 0.0
+    _, longitude_reference = interpolate_position(route, 0.5)
     for segment, limit in zip(route.segments, result.segment_limits, strict=True):
         start_km = cumulative_m / 1000
+        start_nmi = cumulative_m * METERS_TO_NAUTICAL_MILES
         cumulative_m += segment.distance_m
         accepted = sum(candidate.accepted for candidate in limit.candidate_evaluations)
+        selected = next(
+            (
+                candidate
+                for candidate in limit.candidate_evaluations
+                if candidate.accepted
+                and candidate.mach == limit.selected_mach
+                and candidate.altitude_m == limit.selected_altitude_m
+            ),
+            None,
+        )
+        metrics = {} if selected is None or selected.propagation is None else selected.propagation.metrics
         rows.append(
             {
                 "segment": segment.segment_id,
                 "start_km": round(start_km, 1),
                 "end_km": round(cumulative_m / 1000, 1),
+                "start_nmi": round(start_nmi, 1),
+                "end_nmi": round(cumulative_m * METERS_TO_NAUTICAL_MILES, 1),
                 "path": [
-                    [segment.start_longitude, segment.start_latitude],
                     [
-                        _unwrap_longitude(segment.end_longitude, segment.start_longitude),
+                        display_longitude(segment.start_longitude, longitude_reference),
+                        segment.start_latitude,
+                    ],
+                    [
+                        display_longitude(segment.end_longitude, longitude_reference),
                         segment.end_latitude,
                     ],
                 ],
@@ -59,6 +103,10 @@ def segment_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
                 "boom": "NOT MODELED",
                 "accepted_candidates": accepted,
                 "total_candidates": len(limit.candidate_evaluations),
+                "synthetic_score": metrics.get("synthetic_cutoff_score"),
+                "along_wind_kt": None
+                if metrics.get("along_route_wind_mps") is None
+                else float(metrics["along_route_wind_mps"]) * METERS_PER_SECOND_TO_KNOTS,
                 "color": [45, 212, 191, 210] if limit.status == "PASS" else [248, 113, 113, 220],
             }
         )
@@ -69,15 +117,15 @@ def corridor_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
     """Flatten corridor GeoJSON into the minimal records PyDeck needs."""
 
     features = corridor_geojson(route, result.segment_limits)["features"]
+    _, longitude_reference = interpolate_position(route, 0.5)
     rows: list[dict[str, Any]] = []
     for feature in features:
         polygon = feature["geometry"]["coordinates"][0]
-        reference = polygon[0][0]
         rows.append(
             {
                 "segment": feature["properties"]["segment_id"],
                 "polygon": [
-                    [_unwrap_longitude(longitude, reference), latitude]
+                    [display_longitude(longitude, longitude_reference), latitude]
                     for longitude, latitude in polygon
                 ],
                 "color": [20, 184, 166, 55]
