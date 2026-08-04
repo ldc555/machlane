@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -22,10 +24,27 @@ from open_mco.route import (
 from open_mco.ui.view_model import (
     METERS_TO_FEET,
     active_segment_index,
+    aircraft_view,
     atmosphere_metrics,
     corridor_rows,
     display_longitude,
     segment_rows,
+)
+
+# Streamlit renamed ``experimental_fragment`` to ``fragment`` in 1.37. Prefer the stable name, fall
+# back to the experimental one, and degrade to a no-op decorator on older pins (the page simply
+# reruns in full, exactly as before, so nothing breaks — dragging is just less responsive).
+_FragmentFunc = TypeVar("_FragmentFunc", bound=Callable[..., Any])
+
+
+def _identity_fragment(func: _FragmentFunc) -> _FragmentFunc:
+    return func
+
+
+fragment: Any = (
+    getattr(st, "fragment", None)
+    or getattr(st, "experimental_fragment", None)
+    or _identity_fragment
 )
 
 st.set_page_config(
@@ -159,34 +178,98 @@ summary_columns[3].metric(
     "Boom output", "Not modeled", "No ground overpressure", delta_color="off"
 )
 
-@st.fragment
-def live_route_tracker() -> None:
-    """Rerun only the position-dependent map and inspector during slider interaction."""
+# The position slider lives inside the fragment below. Its value is persisted in session state so
+# the position-dependent detail tabs further down still resolve the correct segment on a full
+# rerun, while dragging the slider only reruns the fragment.
+progress = st.session_state.get("aircraft_progress_pct", 24) / 100
+active_index = active_segment_index(demo.route, progress)
+active = rows[active_index]
+active_limit = demo.result.segment_limits[active_index]
+active_altitude_m = active_limit.selected_altitude_m or 0.0
+active_atmosphere = demo.segment_atmospheres[active_index]
+weather_at_altitude = atmosphere_metrics(
+    active_atmosphere, active_altitude_m, float(active["bearing_deg"])
+)
+
+# Route, corridors, waypoints and labels never move while the slider does, so build them once and
+# let the fragment append only the two moving aircraft layers each time it reruns.
+static_map_layers = [
+    pdk.Layer(
+        "PolygonLayer",
+        corridors,
+        get_polygon="polygon",
+        get_fill_color="color",
+        get_line_color=[45, 212, 191, 120],
+        line_width_min_pixels=1,
+        pickable=True,
+    ),
+    pdk.Layer(
+        "PathLayer",
+        rows,
+        get_path="path",
+        get_color="color",
+        width_min_pixels=3,
+        pickable=True,
+    ),
+    pdk.Layer(
+        "ScatterplotLayer",
+        [
+            {"position": [display_longitude(lon, map_longitude), lat]}
+            for lat, lon in demo.route.waypoints
+        ],
+        get_position="position",
+        get_radius=2700,
+        get_fill_color=[226, 236, 246, 220],
+        get_line_color=[6, 12, 20, 255],
+        line_width_min_pixels=2,
+        stroked=True,
+    ),
+    pdk.Layer(
+        "TextLayer",
+        [
+            {
+                "position": [
+                    display_longitude(mission.origin.longitude, map_longitude),
+                    mission.origin.latitude,
+                ],
+                "label": mission.origin.iata,
+            },
+            {
+                "position": [
+                    display_longitude(mission.destination.longitude, map_longitude),
+                    mission.destination.latitude,
+                ],
+                "label": mission.destination.iata,
+            },
+        ],
+        get_position="position",
+        get_text="label",
+        get_size=15,
+        get_pixel_offset=[0, -18],
+        get_color=[226, 236, 246, 230],
+    ),
+]
+
+
+@fragment
+def render_workspace() -> None:
+    """Slider, map and live inspector, isolated so dragging the aircraft skips the heavy tabs.
+
+    Only this fragment reruns while the slider moves, so the aircraft repositions without rebuilding
+    the Plotly profiles, dataframes or evidence views. Route geometry is untouched: the marker is
+    placed by the WGS-84 ``aircraft_view`` transformation, never by screen-space interpolation.
+    """
 
     workspace, inspector = st.columns([3.15, 1], gap="medium")
     with workspace:
-        progress_percent = st.slider(
-            "Aircraft position",
-            0,
-            100,
-            24,
-            1,
-            format="%d%%",
-            key="aircraft_progress",
+        percent = st.slider(
+            "Aircraft position", 0, 100, 24, 1, format="%d%%", key="aircraft_progress_pct"
         )
-    progress = progress_percent / 100
-    active_index = active_segment_index(demo.route, progress)
-    active = rows[active_index]
-    aircraft_lat, aircraft_lon = interpolate_position(demo.route, progress)
-    aircraft_display_lon = display_longitude(aircraft_lon, map_longitude)
-    active_limit = demo.result.segment_limits[active_index]
-    active_altitude_m = active_limit.selected_altitude_m or 0.0
-    active_atmosphere = demo.segment_atmospheres[active_index]
-    weather_at_altitude = atmosphere_metrics(
-        active_atmosphere, active_altitude_m, float(active["bearing_deg"])
-    )
+        drag_progress = percent / 100
+        drag_index = active_segment_index(demo.route, drag_progress)
+        drag_row = rows[drag_index]
+        aircraft = aircraft_view(demo.route, drag_progress, map_longitude)
 
-    with workspace:
         title_left, title_right = st.columns([3, 1])
         with title_left:
             st.subheader("Route corridor")
@@ -200,68 +283,13 @@ def live_route_tracker() -> None:
             f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
             unsafe_allow_html=True,
         )
-        map_layers = [
-            pdk.Layer(
-                "PolygonLayer",
-                corridors,
-                get_polygon="polygon",
-                get_fill_color="color",
-                get_line_color=[45, 212, 191, 120],
-                line_width_min_pixels=1,
-                pickable=True,
-            ),
-            pdk.Layer(
-                "PathLayer",
-                rows,
-                get_path="path",
-                get_color="color",
-                width_min_pixels=3,
-                pickable=True,
-            ),
+
+        aircraft_layers = [
             pdk.Layer(
                 "ScatterplotLayer",
-                [
-                    {"position": [display_longitude(lon, map_longitude), lat]}
-                    for lat, lon in demo.route.waypoints
-                ],
+                [{"position": [aircraft["display_longitude"], aircraft["latitude"]]}],
                 get_position="position",
-                get_radius=2700,
-                get_fill_color=[226, 236, 246, 220],
-                get_line_color=[6, 12, 20, 255],
-                line_width_min_pixels=2,
-                stroked=True,
-            ),
-            pdk.Layer(
-                "TextLayer",
-                [
-                    {
-                        "position": [
-                            display_longitude(mission.origin.longitude, map_longitude),
-                            mission.origin.latitude,
-                        ],
-                        "label": mission.origin.iata,
-                    },
-                    {
-                        "position": [
-                            display_longitude(mission.destination.longitude, map_longitude),
-                            mission.destination.latitude,
-                        ],
-                        "label": mission.destination.iata,
-                    },
-                ],
-                get_position="position",
-                get_text="label",
-                get_size=15,
-                get_pixel_offset=[0, -18],
-                get_color=[226, 236, 246, 230],
-            ),
-            pdk.Layer(
-                "ScatterplotLayer",
-                [{"position": [aircraft_display_lon, aircraft_lat]}],
-                get_position="position",
-                get_radius=7000,
-                radius_min_pixels=16,
-                radius_max_pixels=24,
+                get_radius=5200,
                 get_fill_color=[255, 255, 255, 245],
                 get_line_color=[45, 212, 191, 255],
                 line_width_min_pixels=4,
@@ -269,17 +297,17 @@ def live_route_tracker() -> None:
             ),
             pdk.Layer(
                 "TextLayer",
-                [{"position": [aircraft_display_lon, aircraft_lat], "label": "✈"}],
+                [{"position": [aircraft["display_longitude"], aircraft["latitude"]], "label": ">"}],
                 get_position="position",
                 get_text="label",
-                get_size=36,
+                get_size=20,
                 get_color=[7, 17, 27, 255],
-                get_angle=active["bearing_deg"] - 45,
+                get_angle=aircraft["bearing_deg"] - 90,
             ),
         ]
         st.pydeck_chart(
             pdk.Deck(
-                layers=map_layers,
+                layers=[*static_map_layers, *aircraft_layers],
                 map_style=pdk.map_styles.CARTO_DARK,
                 initial_view_state=pdk.ViewState(
                     latitude=map_latitude,
@@ -299,24 +327,29 @@ def live_route_tracker() -> None:
         with legend_left:
             st.caption("Colored sections: internally uniform synthetic weather regimes")
         with legend_right:
-            st.caption(f"{progress:.0%} complete · {active['segment']}")
+            st.caption(f"{drag_progress:.0%} complete · {drag_row['segment']}")
 
     with inspector:
+        drag_weather = atmosphere_metrics(
+            demo.segment_atmospheres[drag_index],
+            demo.result.segment_limits[drag_index].selected_altitude_m or 0.0,
+            float(drag_row["bearing_deg"]),
+        )
         st.markdown('<div class="section-kicker">Live inspector</div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="status-card"><div class="label">Active segment</div><div class="value">{active["segment"]}</div><div class="meta">{active["start_nmi"]:.1f}–{active["end_nmi"]:.1f} nmi · track {active["bearing_deg"]:.0f}°</div></div>',
+            f'<div class="status-card"><div class="label">Active segment</div><div class="value">{drag_row["segment"]}</div><div class="meta">{drag_row["start_nmi"]:.1f}–{drag_row["end_nmi"]:.1f} nmi · track {drag_row["bearing_deg"]:.0f}°</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="status-card"><div class="label">Recommendation</div><div class="value">Mach {active["mach"]:.2f}</div><div class="meta">{active["altitude_ft"]:,} ft · scenario target unvalidated</div></div>',
+            f'<div class="status-card"><div class="label">Recommendation</div><div class="value">Mach {drag_row["mach"]:.2f}</div><div class="meta">{drag_row["altitude_ft"]:,} ft · scenario target unvalidated</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="status-card"><div class="label">Ambient profile</div><div class="value">{weather_at_altitude["pressure_hpa"]:.0f} hPa</div><div class="meta">{weather_at_altitude["temperature_c"]:.1f} °C · wind {weather_at_altitude["wind_speed_kt"]:.0f} kt · synthetic</div></div>',
+            f'<div class="status-card"><div class="label">Ambient profile</div><div class="value">{drag_weather["pressure_hpa"]:.0f} hPa</div><div class="meta">{drag_weather["temperature_c"]:.1f} °C · wind {drag_weather["wind_speed_kt"]:.0f} kt · synthetic</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="status-card"><div class="label">Why this segment starts</div><div class="value" style="font-size:.92rem">{active["boundary_reason"]}</div><div class="meta">{active["weather_samples"]} atmosphere samples grouped</div></div>',
+            f'<div class="status-card"><div class="label">Why this segment starts</div><div class="value" style="font-size:.92rem">{drag_row["boundary_reason"]}</div><div class="meta">{drag_row["weather_samples"]} atmosphere samples grouped</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
@@ -324,21 +357,11 @@ def live_route_tracker() -> None:
             unsafe_allow_html=True,
         )
         st.caption(
-            f"{active['accepted_candidates']} of {active['total_candidates']} grid candidates accepted by the mock boundary."
+            f"{drag_row['accepted_candidates']} of {drag_row['total_candidates']} grid candidates accepted by the mock boundary."
         )
 
 
-live_route_tracker()
-
-progress = float(st.session_state.get("aircraft_progress", 24)) / 100
-active_index = active_segment_index(demo.route, progress)
-active = rows[active_index]
-active_limit = demo.result.segment_limits[active_index]
-active_altitude_m = active_limit.selected_altitude_m or 0.0
-active_atmosphere = demo.segment_atmospheres[active_index]
-weather_at_altitude = atmosphere_metrics(
-    active_atmosphere, active_altitude_m, float(active["bearing_deg"])
-)
+render_workspace()
 
 plan_tab, atmosphere_tab, model_tab, evidence_tab = st.tabs(
     ["Weather segments", "Atmosphere", "How it works", "Evidence"]
@@ -384,6 +407,10 @@ with plan_tab:
     )
 
 with atmosphere_tab:
+    st.caption(
+        "Profiles follow the aircraft's active segment. The map and inspector above track the "
+        "slider live; these deeper panels refresh on a full reload, e.g. changing mission."
+    )
     weather_columns = st.columns(4)
     weather_columns[0].metric("Ambient pressure", f'{weather_at_altitude["pressure_hpa"]:.0f} hPa')
     weather_columns[1].metric("Temperature", f'{weather_at_altitude["temperature_c"]:.1f} °C')
@@ -504,6 +531,7 @@ with model_tab:
         )
     with equation_right:
         st.markdown("##### Active-segment variables")
+        st.caption("Reflect the segment at the last full reload, not mid-drag.")
         st.dataframe(
             pd.DataFrame(
                 [

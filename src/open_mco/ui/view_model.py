@@ -55,6 +55,26 @@ def active_segment_index(route: Route, progress: float) -> int:
     return len(route.segments) - 1
 
 
+def aircraft_view(
+    route: Route, progress: float, longitude_reference: float
+) -> dict[str, float]:
+    """Resolve the aircraft marker position and WGS-84 track bearing at a progress fraction.
+
+    Position and bearing are taken from the existing geodesic route interpolation, so this never
+    substitutes approximate latitude/longitude interpolation. ``display_longitude`` keeps the marker
+    continuous across the antimeridian when unwrapped against the same reference the route uses.
+    """
+
+    latitude, longitude = interpolate_position(route, progress)
+    bearing_deg = route.segments[active_segment_index(route, progress)].bearing_deg
+    return {
+        "latitude": latitude,
+        "longitude": longitude,
+        "display_longitude": display_longitude(longitude, longitude_reference),
+        "bearing_deg": bearing_deg,
+    }
+
+
 def segment_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
     """Create the one canonical UI table for map, inspector, plots, and downloads."""
 

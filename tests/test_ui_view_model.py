@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from open_mco.demo import build_demo_scenario
+from open_mco.route import interpolate_position
 from open_mco.ui.view_model import (
     active_segment_index,
+    aircraft_view,
     atmosphere_metrics,
     corridor_rows,
+    display_longitude,
     segment_rows,
 )
 
@@ -31,6 +36,46 @@ def test_active_segment_bounds_progress() -> None:
     assert active_segment_index(scenario.route, 0) == 0
     assert active_segment_index(scenario.route, 1) == last_index
     assert active_segment_index(scenario.route, 2) == last_index
+
+
+def test_aircraft_view_matches_geodesic_position_and_segment_bearing() -> None:
+    scenario = build_demo_scenario()
+    route = scenario.route
+    _, reference = interpolate_position(route, 0.5)
+    for progress in (0.0, 0.1, 0.37, 0.5, 0.83, 1.0):
+        view = aircraft_view(route, progress, reference)
+        latitude, longitude = interpolate_position(route, progress)
+        index = active_segment_index(route, progress)
+        assert view["latitude"] == latitude
+        assert view["longitude"] == longitude
+        assert view["bearing_deg"] == route.segments[index].bearing_deg
+        assert 0.0 <= view["bearing_deg"] < 360.0
+        assert view["display_longitude"] == display_longitude(longitude, reference)
+        assert abs(view["display_longitude"] - reference) <= 180.0
+
+
+def test_aircraft_view_endpoints_align_with_route() -> None:
+    scenario = build_demo_scenario()
+    route = scenario.route
+    _, reference = interpolate_position(route, 0.5)
+    start = aircraft_view(route, 0.0, reference)
+    end = aircraft_view(route, 1.0, reference)
+
+    assert start["latitude"] == pytest.approx(route.segments[0].start_latitude, abs=1e-6)
+    assert start["longitude"] == pytest.approx(route.segments[0].start_longitude, abs=1e-6)
+    assert end["latitude"] == pytest.approx(route.segments[-1].end_latitude, abs=1e-6)
+
+
+def test_aircraft_view_is_continuous_across_the_dateline() -> None:
+    scenario = build_demo_scenario("den_nrt")
+    route = scenario.route
+    _, reference = interpolate_position(route, 0.5)
+    samples = [aircraft_view(route, index / 240, reference) for index in range(241)]
+
+    for current, following in zip(samples, samples[1:], strict=False):
+        # A failed antimeridian unwrap would show up as a ~360° jump between adjacent samples.
+        assert abs(following["display_longitude"] - current["display_longitude"]) < 30.0
+        assert 0.0 <= current["bearing_deg"] < 360.0
 
 
 def test_pacific_route_display_does_not_span_the_long_way_around() -> None:
