@@ -37,29 +37,43 @@ def project_wind_onto_bearing(zonal_mps: float, meridional_mps: float, bearing_d
 
 
 class SyntheticAtmosphereProvider:
-    """Small deterministic atmosphere for integration tests and UI development only."""
+    """Small spatially varying atmosphere for integration tests and UI development only."""
 
     name = "synthetic"
 
     def profile(
         self, latitude: float, longitude: float, valid_time: datetime
     ) -> AtmosphericProfile:
+        longitude_phase = math.radians(longitude + 97)
+        latitude_phase = math.radians((latitude - 37) * 3)
+        temperature_offset = 2.4 * math.sin(2 * longitude_phase) + 1.2 * math.sin(
+            latitude_phase
+        )
+        pressure_scale = 1 + 0.012 * math.cos(longitude_phase) + 0.006 * math.sin(
+            latitude_phase
+        )
+        zonal_offset = 10 * math.sin(2 * longitude_phase) + 0.35 * (latitude - 37)
+        meridional_offset = 7 * math.sin(latitude_phase) - 4 * math.sin(longitude_phase)
+        base_temperature = (288.15, 268.65, 249.15, 229.65, 216.65, 216.65, 216.65)
+        base_pressure = (101325, 70109, 47181, 30742, 19399, 12045, 7505)
+        base_zonal_wind = (2, 5, 8, 12, 18, 22, 25)
+        base_meridional_wind = (1, 2, 3, 5, 8, 10, 12)
         now = datetime.now(UTC)
         source = AtmosphericSourceMetadata(
             provider=self.name,
             valid_time=valid_time,
             variables=("altitude", "temperature", "pressure", "u_wind", "v_wind"),
-            horizontal_interpolation="constant synthetic column",
+            horizontal_interpolation="smooth synthetic spatial field",
             vertical_interpolation="linear",
             retrieved_at=now,
             label="SYNTHETIC_NOT_FOR_ENGINEERING_USE",
         )
         return AtmosphericProfile(
             altitude_m=(0, 3000, 6000, 9000, 12000, 15000, 18000),
-            temperature_k=(288.15, 268.65, 249.15, 229.65, 216.65, 216.65, 216.65),
-            pressure_pa=(101325, 70109, 47181, 30742, 19399, 12045, 7505),
-            zonal_wind_mps=(2, 5, 8, 12, 18, 22, 25),
-            meridional_wind_mps=(1, 2, 3, 5, 8, 10, 12),
+            temperature_k=tuple(value + temperature_offset for value in base_temperature),
+            pressure_pa=tuple(value * pressure_scale for value in base_pressure),
+            zonal_wind_mps=tuple(value + zonal_offset for value in base_zonal_wind),
+            meridional_wind_mps=tuple(value + meridional_offset for value in base_meridional_wind),
             latitude=latitude,
             longitude=longitude,
             valid_time=valid_time,

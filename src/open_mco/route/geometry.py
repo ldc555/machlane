@@ -74,6 +74,21 @@ def interpolate_position(route: Route, progress: float) -> tuple[float, float]:
     return last.end_latitude, last.end_longitude
 
 
+def interpolate_segment_position(
+    segment: RouteSegment, progress: float = 0.5
+) -> tuple[float, float]:
+    """Interpolate one route segment by bounded distance fraction."""
+
+    bounded = min(1.0, max(0.0, progress))
+    longitude, latitude, _ = _GEOD.fwd(
+        segment.start_longitude,
+        segment.start_latitude,
+        segment.bearing_deg,
+        segment.distance_m * bounded,
+    )
+    return latitude, longitude
+
+
 def route_distance_m(route: Route) -> float:
     """Return the WGS-84 ellipsoidal distance along every route segment."""
 

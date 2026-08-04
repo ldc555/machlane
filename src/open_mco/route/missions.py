@@ -10,7 +10,7 @@ from open_mco.models import Route
 from .geometry import route_from_waypoints
 
 AIRPORT_SOURCE_URL = "https://ourairports.com/data/"
-AIRPORT_SOURCE_RETRIEVED = "2026-08-03"
+AIRPORT_SOURCE_RETRIEVED = "2026-08-04"
 
 
 @dataclass(frozen=True)
@@ -75,13 +75,14 @@ _AIRPORTS = {
     airport.iata: airport
     for airport in (
         Airport("KDFW", "DFW", "Dallas Fort Worth International Airport", 32.896801, -97.038002, "US-TX"),
+        Airport("KDEN", "DEN", "Denver International Airport", 39.860027, -104.673792, "US-CO"),
+        Airport("KBOS", "BOS", "Boston Logan International Airport", 42.361970, -71.007900, "US-MA"),
         Airport("KJFK", "JFK", "John F. Kennedy International Airport", 40.639447, -73.779317, "US-NY"),
         Airport("KLAX", "LAX", "Los Angeles International Airport", 33.942501, -118.407997, "US-CA"),
-        Airport("KSFO", "SFO", "San Francisco International Airport", 37.619806, -122.374821, "US-CA"),
         Airport("PHNL", "HNL", "Daniel K. Inouye International Airport", 21.318387, -157.925670, "US-HI"),
         Airport("TJSJ", "SJU", "Luis Munoz Marin International Airport", 18.439400, -66.001801, "PR-U-A"),
         Airport("EGLL", "LHR", "London Heathrow Airport", 51.470748, -0.459909, "GB-ENG"),
-        Airport("RJTT", "HND", "Tokyo Haneda International Airport", 35.549678, 139.786958, "JP-13"),
+        Airport("RJAA", "NRT", "Narita International Airport", 35.768580, 140.388714, "JP-12"),
     )
 }
 
@@ -138,6 +139,14 @@ _MISSIONS = (
         "Oceanic high-speed concept connecting the mainland and Hawaii.",
     ),
     _mission(
+        "bos_hnl",
+        "BOS",
+        "HNL",
+        "Boston to Hawaii",
+        "us_oceanic",
+        "Long U.S. oceanic concept connecting New England and Hawaii.",
+    ),
+    _mission(
         "dfw_sju",
         "DFW",
         "SJU",
@@ -154,12 +163,12 @@ _MISSIONS = (
         "Classic transatlantic market; the track is conceptual and not a daily NAT clearance.",
     ),
     _mission(
-        "sfo_hnd",
-        "SFO",
-        "HND",
-        "North Pacific",
+        "den_nrt",
+        "DEN",
+        "NRT",
+        "Denver to Narita",
         "global_oceanic",
-        "Long-range Pacific concept crossing the antimeridian on the shortest geodesic.",
+        "North Pacific concept following the shortest geodesic through Alaska and the Aleutians.",
     ),
 )
 

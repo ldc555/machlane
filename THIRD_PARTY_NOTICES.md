@@ -6,5 +6,5 @@ separate NASA software request and agreement. Public weather and terrain data re
 source terms and attribution requirements.
 
 Curated airport reference points are derived from OurAirports' public-domain data dump
-(https://ourairports.com/data/), retrieved 2026-08-03. OurAirports provides the data without a
+(https://ourairports.com/data/), retrieved 2026-08-04. OurAirports provides the data without a
 guarantee of accuracy or fitness for use.

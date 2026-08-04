@@ -34,7 +34,7 @@ def test_active_segment_bounds_progress() -> None:
 
 
 def test_pacific_route_display_does_not_span_the_long_way_around() -> None:
-    scenario = build_demo_scenario("sfo_hnd")
+    scenario = build_demo_scenario("den_nrt")
     rows = segment_rows(scenario.route, scenario.result)
     corridors = corridor_rows(scenario.route, scenario.result)
 
@@ -51,6 +51,17 @@ def test_pacific_route_display_does_not_span_the_long_way_around() -> None:
         <= 180
         for row in corridors
     )
+
+
+def test_weather_segments_are_variable_and_explain_their_boundaries() -> None:
+    scenario = build_demo_scenario("den_nrt")
+    lengths_nmi = [round(segment.distance_m / 1852) for segment in scenario.route.segments]
+
+    assert len(scenario.weather_regimes) == len(scenario.route.segments) >= 4
+    assert len(set(lengths_nmi)) > 1
+    assert scenario.weather_regimes[0].boundary_reason.startswith("Departure")
+    assert any("changed" in regime.boundary_reason for regime in scenario.weather_regimes[1:])
+    assert len(scenario.segment_atmospheres) == len(scenario.route.segments)
 
 
 def test_atmosphere_metrics_distinguish_ambient_pressure_and_wind() -> None:

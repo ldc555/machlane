@@ -181,13 +181,16 @@ PCBoom is not bundled or redistributed. Access requires a separate NASA software
 ### Routes and distance
 
 The UI ships with a small catalog of conceptual future high-speed missions: DFW–JFK, DFW–LAX,
-LAX–JFK, LAX–HNL, DFW–SJU, JFK–LHR, and SFO–HND. Endpoints are real airport reference points
+LAX–JFK, LAX–HNL, BOS–HNL, DFW–SJU, JFK–LHR, and DEN–NRT. Endpoints are real airport reference points
 retrieved from the public-domain [OurAirports data dump](https://ourairports.com/data/) on
-2026-08-03. The points are committed as a reviewed subset so opening the UI never depends on a
+2026-08-04. The points are committed as a reviewed subset so opening the UI never depends on a
 network request or a changing upstream file.
 
-Each concept uses the shortest path on the WGS-84 ellipsoid, calculated with `pyproj.Geod`, and is
-split into roughly 200 km analysis segments. It is intentionally **not** described as a filed route,
+Each concept uses the shortest path on the WGS-84 ellipsoid, calculated with `pyproj.Geod`. A fine
+internal atmosphere sampling grid is merged into variable-length analysis segments: adjacent samples
+remain in one segment until pressure, temperature, or the wind vector leaves the current uniform
+regime. The sampling interval is a numerical input; it is not the output segment length. It is
+intentionally **not** described as a filed route,
 published airway, daily oceanic track, ATC clearance, or approved supersonic corridor. Current U.S.
 procedures can later be imported from the FAA's 28-day [CIFP product](https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/download/),
 but present-day subsonic procedures should not be passed off as future hypersonic routing.
@@ -368,8 +371,8 @@ open-mco demo
 
 The map-first workspace keeps the synthetic aircraft, route corridor, active-segment recommendation,
 atmospheric profile, model explanation, validation state, provenance, and evidence generation in one
-screen. Aviation distances are displayed primarily in nautical miles. Pacific missions are unwrapped
-around the antimeridian for one continuous map path. Moving the aircraft updates the inspector without
+screen. Aviation distances are displayed primarily in nautical miles. DEN–NRT is routed over Alaska
+and unwrapped around the antimeridian for one continuous map path. Moving the aircraft updates the inspector without
 recomputing the cached route plan.
 
 ```bash

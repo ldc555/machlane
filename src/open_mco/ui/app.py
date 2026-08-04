@@ -108,6 +108,31 @@ mission_id = st.selectbox(
 mission = get_mission(mission_id)
 demo = scenario(mission_id)
 rows = segment_rows(demo.route, demo.result)
+regime_by_id = {regime.segment_id: regime for regime in demo.weather_regimes}
+segment_palette = (
+    [45, 212, 191, 225],
+    [96, 165, 250, 225],
+    [167, 139, 250, 225],
+    [251, 191, 36, 225],
+    [244, 114, 182, 225],
+    [52, 211, 153, 225],
+)
+for index, row in enumerate(rows):
+    regime = regime_by_id[str(row["segment"])]
+    row.update(
+        {
+            "boundary_reason": regime.boundary_reason,
+            "weather_samples": regime.sample_count,
+            "regime_temperature_c": regime.temperature_k - 273.15,
+            "regime_pressure_hpa": regime.pressure_hpa,
+            "regime_wind_kt": regime.wind_speed_mps * 1.943844492,
+            "ray_status": "NOT MODELED",
+            "color": segment_palette[index % len(segment_palette)],
+        }
+    )
+corridors = corridor_rows(demo.route, demo.result)
+for index, corridor in enumerate(corridors):
+    corridor["color"] = [*segment_palette[index % len(segment_palette)][:3], 48]
 distance_km = route_distance_m(demo.route) / 1000
 distance_nmi = distance_km / 1.852
 map_latitude, map_longitude = interpolate_position(demo.route, 0.5)
@@ -122,7 +147,10 @@ summary_columns[0].metric(
     "Route distance", f"{distance_nmi:,.0f} nmi", f"{distance_km:,.0f} km", delta_color="off"
 )
 summary_columns[1].metric(
-    "Analysis segments", f"{len(demo.route.segments)}", "≈108 nmi each", delta_color="off"
+    "Weather segments",
+    f"{len(demo.route.segments)}",
+    "Variable length · atmosphere-defined",
+    delta_color="off",
 )
 summary_columns[2].metric(
     "Weather input", "Synthetic", "Live NOAA not connected", delta_color="off"
@@ -143,8 +171,9 @@ aircraft_lat, aircraft_lon = interpolate_position(demo.route, progress)
 aircraft_display_lon = display_longitude(aircraft_lon, map_longitude)
 active_limit = demo.result.segment_limits[active_index]
 active_altitude_m = active_limit.selected_altitude_m or 0.0
+active_atmosphere = demo.segment_atmospheres[active_index]
 weather_at_altitude = atmosphere_metrics(
-    demo.atmosphere, active_altitude_m, float(active["bearing_deg"])
+    active_atmosphere, active_altitude_m, float(active["bearing_deg"])
 )
 
 with workspace:
@@ -158,14 +187,14 @@ with workspace:
             unsafe_allow_html=True,
         )
     st.markdown(
-        f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Geometry <b>WGS-84 geodesic</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
+        f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_nmi:,.0f} nmi</b></span><span>Segments <b>Weather regimes · variable length</b></span><span>Aircraft <b>Demo SST</b></span><span>Atmosphere <b>Synthetic</b></span><span>Terrain <b>Flat</b></span><span>Engine <b>Mock MCO</b></span><span>Valid <b>{demo.atmosphere.valid_time:%H:%M UTC}</b></span></div>',
         unsafe_allow_html=True,
     )
 
     map_layers = [
         pdk.Layer(
             "PolygonLayer",
-            corridor_rows(demo.route, demo.result),
+            corridors,
             get_polygon="polygon",
             get_fill_color="color",
             get_line_color=[45, 212, 191, 120],
@@ -257,7 +286,7 @@ with workspace:
     )
     legend_left, legend_right = st.columns([2, 1])
     with legend_left:
-        st.caption("Teal corridor: accepted by the synthetic integration boundary")
+        st.caption("Colored sections: internally uniform synthetic weather regimes")
     with legend_right:
         st.caption(f"{progress:.0%} complete · {active['segment']}")
 
@@ -276,6 +305,10 @@ with inspector:
         unsafe_allow_html=True,
     )
     st.markdown(
+        f'<div class="status-card"><div class="label">Why this segment starts</div><div class="value" style="font-size:.92rem">{active["boundary_reason"]}</div><div class="meta">{active["weather_samples"]} atmosphere samples grouped</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
         '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT MODELED</span></div><div class="meta">No 0.11 psf determination</div></div>',
         unsafe_allow_html=True,
     )
@@ -284,7 +317,7 @@ with inspector:
     )
 
 plan_tab, atmosphere_tab, model_tab, evidence_tab = st.tabs(
-    ["Flight plan", "Atmosphere", "How it works", "Evidence"]
+    ["Weather segments", "Atmosphere", "How it works", "Evidence"]
 )
 
 with plan_tab:
@@ -295,24 +328,35 @@ with plan_tab:
         width="stretch",
         column_order=[
             "segment",
+            "boundary_reason",
             "start_nmi",
             "end_nmi",
+            "regime_pressure_hpa",
+            "regime_temperature_c",
+            "regime_wind_kt",
             "altitude_ft",
             "mach",
-            "along_wind_kt",
-            "decision",
-            "boom",
+            "ray_status",
         ],
         column_config={
             "segment": "Segment",
+            "boundary_reason": "Boundary trigger",
             "start_nmi": st.column_config.NumberColumn("From nmi", format="%.1f"),
             "end_nmi": st.column_config.NumberColumn("To nmi", format="%.1f"),
+            "regime_pressure_hpa": st.column_config.NumberColumn(
+                "Pressure", format="%.1f hPa"
+            ),
+            "regime_temperature_c": st.column_config.NumberColumn(
+                "Temperature", format="%.1f °C"
+            ),
+            "regime_wind_kt": st.column_config.NumberColumn("Wind", format="%.1f kt"),
             "altitude_ft": st.column_config.NumberColumn("Altitude", format="%d ft"),
             "mach": st.column_config.NumberColumn("Mach", format="%.2f"),
-            "along_wind_kt": st.column_config.NumberColumn("Along wind", format="%.1f kt"),
-            "decision": "Planning result",
-            "boom": "Surface boom",
+            "ray_status": "Ray propagation",
         },
+    )
+    st.caption(
+        "Synthetic demo thresholds at 50,000 ft: Δtemperature > 0.7 K, Δpressure > 1.0 hPa, or Δwind vector > 2.5 m/s. The internal 100 nmi sampling interval controls detection resolution; segment lengths are variable outputs, not fixed spacing."
     )
 
 with atmosphere_tab:
@@ -323,14 +367,14 @@ with atmosphere_tab:
     weather_columns[3].metric("Along-track wind", f'{weather_at_altitude["along_wind_kt"]:+.0f} kt')
 
     chart_left, chart_right = st.columns(2)
-    altitude_ft = [altitude * METERS_TO_FEET for altitude in demo.atmosphere.altitude_m]
-    pressure_hpa = [pressure / 100 for pressure in demo.atmosphere.pressure_pa]
-    temperature_c = [temperature - 273.15 for temperature in demo.atmosphere.temperature_k]
+    altitude_ft = [altitude * METERS_TO_FEET for altitude in active_atmosphere.altitude_m]
+    pressure_hpa = [pressure / 100 for pressure in active_atmosphere.pressure_pa]
+    temperature_c = [temperature - 273.15 for temperature in active_atmosphere.temperature_k]
     wind_speed_kt = [
         math.hypot(u, v) * 1.943844492
         for u, v in zip(
-            demo.atmosphere.zonal_wind_mps,
-            demo.atmosphere.meridional_wind_mps,
+            active_atmosphere.zonal_wind_mps,
+            active_atmosphere.meridional_wind_mps,
             strict=True,
         )
     ]
@@ -357,7 +401,7 @@ with atmosphere_tab:
             )
         )
         pressure_figure.update_layout(
-            title="Ambient pressure profile · synthetic",
+            title=f'Pressure profile · {active["segment"]} · synthetic',
             xaxis_title="Pressure (hPa)",
             yaxis_title="Altitude (ft)",
             template="plotly_dark",
@@ -380,7 +424,7 @@ with atmosphere_tab:
             )
         )
         wind_figure.update_layout(
-            title="Wind profile · synthetic",
+            title=f'Wind profile · {active["segment"]} · synthetic',
             xaxis_title="Wind speed (kt)",
             yaxis_title="Altitude (ft)",
             template="plotly_dark",
@@ -412,10 +456,10 @@ with model_tab:
     st.markdown(
         """
 <div class="calc-grid">
-  <div class="calc-step"><span class="number">01</span><b>Route geometry</b><span>WGS-84 distance, track bearing, and position along the selected mission.</span></div>
-  <div class="calc-step"><span class="number">02</span><b>Atmospheric state</b><span>Ambient pressure, temperature, and wind interpolated to each candidate altitude.</span></div>
-  <div class="calc-step"><span class="number">03</span><b>Mock cutoff score</b><span>An arbitrary software-test boundary using altitude, along-track wind, and terrain.</span></div>
-  <div class="calc-step"><span class="number">04</span><b>Boom result</b><span>Not calculated: no pressure signature, ground overpressure, footprint, or loudness.</span></div>
+  <div class="calc-step"><span class="number">01</span><b>Sample atmosphere</b><span>Pressure, temperature, and wind are sampled along the WGS-84 flight path.</span></div>
+  <div class="calc-step"><span class="number">02</span><b>Form weather regimes</b><span>Adjacent samples remain together until a characteristic crosses its threshold.</span></div>
+  <div class="calc-step"><span class="number">03</span><b>Plan each segment</b><span>Mach and altitude candidates are evaluated separately inside every weather regime.</span></div>
+  <div class="calc-step"><span class="number">04</span><b>Propagate rays</b><span>Not implemented: effective sound speed, ray paths, footprint, and ground overpressure.</span></div>
 </div>
 """,
         unsafe_allow_html=True,

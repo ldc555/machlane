@@ -21,12 +21,22 @@ from open_mco.models import (
 )
 from open_mco.optimization import GridSearchPlanner
 from open_mco.physics import MockMCOEngine
-from open_mco.route import get_mission, interpolate_position, route_from_waypoints
+from open_mco.route import (
+    WeatherRegimeSummary,
+    WeatherSegmentationSettings,
+    get_mission,
+    interpolate_position,
+    interpolate_segment_position,
+    route_from_waypoints,
+    segment_route_by_weather,
+)
 from open_mco.terrain import FlatTerrainProvider
 
 DEMO_VALID_TIME = datetime(2026, 8, 3, 12, tzinfo=UTC)
 DEMO_MACH_VALUES = (1.02, 1.05, 1.08, 1.10, 1.12, 1.15)
 DEMO_ALTITUDES_M = (12_192, 12_802, 13_411, 14_021, 14_630, 15_240)
+DEMO_WEATHER_SAMPLE_SPACING_M = 185_200
+DEMO_WEATHER_SETTINGS = WeatherSegmentationSettings()
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,8 @@ class DemoScenario:
     result: PlannerResult
     atmosphere: AtmosphericProfile
     terrain: TerrainProfile
+    weather_regimes: tuple[WeatherRegimeSummary, ...]
+    segment_atmospheres: tuple[AtmosphericProfile, ...]
 
 
 def _synthetic_value(value: float | str, unit: str) -> SourcedValue:
@@ -77,12 +89,19 @@ def demo_route(
     csv_path: str | Path | None = None,
     *,
     mission_id: str = "dfw_jfk",
-    spacing_m: float = 200_000,
+    spacing_m: float = DEMO_WEATHER_SAMPLE_SPACING_M,
 ) -> Route:
-    """Build a curated airport-to-airport mission or an explicitly supplied waypoint file."""
+    """Build a weather-regime route or an explicitly supplied waypoint file."""
 
     if csv_path is None:
-        return get_mission(mission_id).build_route(spacing_m=spacing_m)
+        sampled_route = get_mission(mission_id).build_route(spacing_m=spacing_m)
+        route, _ = segment_route_by_weather(
+            sampled_route,
+            SyntheticAtmosphereProvider(),
+            DEMO_VALID_TIME,
+            settings=DEMO_WEATHER_SETTINGS,
+        )
+        return route
     frame = pd.read_csv(csv_path)
     waypoints = list(zip(frame["latitude"], frame["longitude"], strict=True))
     return route_from_waypoints(waypoints, spacing_m=spacing_m, name="Imported research route")
@@ -92,8 +111,16 @@ def build_demo_scenario(mission_id: str = "dfw_jfk") -> DemoScenario:
     """Build the deterministic scenario once for any presentation or export surface."""
 
     aircraft = synthetic_aircraft()
-    route = demo_route(mission_id=mission_id)
     weather = SyntheticAtmosphereProvider()
+    sampled_route = get_mission(mission_id).build_route(
+        spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M
+    )
+    route, weather_regimes = segment_route_by_weather(
+        sampled_route,
+        weather,
+        DEMO_VALID_TIME,
+        settings=DEMO_WEATHER_SETTINGS,
+    )
     terrain_provider = FlatTerrainProvider()
     planner = GridSearchPlanner(
         atmosphere_provider=weather,
@@ -109,12 +136,18 @@ def build_demo_scenario(mission_id: str = "dfw_jfk") -> DemoScenario:
         valid_time=DEMO_VALID_TIME,
     )
     midpoint_latitude, midpoint_longitude = interpolate_position(route, 0.5)
+    segment_atmospheres = tuple(
+        weather.profile(*interpolate_segment_position(segment), DEMO_VALID_TIME)
+        for segment in route.segments
+    )
     return DemoScenario(
         aircraft=aircraft,
         route=route,
         result=result,
         atmosphere=weather.profile(midpoint_latitude, midpoint_longitude, DEMO_VALID_TIME),
         terrain=terrain_provider.profile(route.segments[0]),
+        weather_regimes=weather_regimes,
+        segment_atmospheres=segment_atmospheres,
     )
 
 
