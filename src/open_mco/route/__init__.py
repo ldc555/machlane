@@ -20,6 +20,7 @@ from .opensky import OpenSkyRouteNotFoundError, OpenSkyTrackProvider
 from .weather import (
     WeatherRegimeSummary,
     WeatherSegmentationSettings,
+    coarsen_route_for_weather,
     segment_route_by_weather,
 )
 
@@ -33,6 +34,7 @@ __all__ = [
     "OpenSkyRouteNotFoundError",
     "WeatherRegimeSummary",
     "WeatherSegmentationSettings",
+    "coarsen_route_for_weather",
     "corridor_geojson",
     "get_mission",
     "interpolate_position",

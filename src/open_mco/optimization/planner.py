@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from open_mco.atmosphere import AtmosphereProvider
+from open_mco.atmosphere import AtmosphereProvider, profiles_at_points
 from open_mco.models import (
     AircraftModel,
     CandidateEvaluation,
@@ -53,9 +53,11 @@ class GridSearchPlanner:
         ceiling = float(aircraft.operating_limits.service_ceiling.value_si)
         floor_value = aircraft.operating_limits.minimum_cruise_altitude
         floor = 0.0 if floor_value is None else float(floor_value.value_si)
-        for segment in route.segments:
-            midpoint_lat, midpoint_lon = interpolate_segment_position(segment)
-            atmosphere = self.atmosphere_provider.profile(midpoint_lat, midpoint_lon, valid_time)
+        atmosphere_points = [interpolate_segment_position(segment) for segment in route.segments]
+        atmospheres = profiles_at_points(
+            self.atmosphere_provider, atmosphere_points, valid_time
+        )
+        for segment, atmosphere in zip(route.segments, atmospheres, strict=True):
             terrain = self.terrain_provider.profile(segment)
             evaluations: list[CandidateEvaluation] = []
             for mach in sorted(mach_values, reverse=True):

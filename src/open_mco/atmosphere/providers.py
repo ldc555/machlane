@@ -29,6 +29,19 @@ class AtmosphereProvider(Protocol):
         ...
 
 
+def profiles_at_points(
+    provider: AtmosphereProvider,
+    points: list[tuple[float, float]],
+    valid_time: datetime,
+) -> tuple[AtmosphericProfile, ...]:
+    """Use a provider's vectorized path when available, with a portable fallback."""
+
+    batch = getattr(provider, "profiles", None)
+    if callable(batch):
+        return tuple(batch(points, valid_time))
+    return tuple(provider.profile(latitude, longitude, valid_time) for latitude, longitude in points)
+
+
 def project_wind_onto_bearing(zonal_mps: float, meridional_mps: float, bearing_deg: float) -> float:
     """Project eastward/northward wind onto a clockwise-from-north route bearing."""
 
@@ -87,7 +100,11 @@ class _HerbiePressureProvider:
     name = "network"
     model = ""
     product = ""
-    search = r":(?:HGT|TMP|UGRD|VGRD|RH):[0-9]+ mb:"
+    pressure_levels = (100, 150, 200, 250, 300, 400, 500, 700, 850, 1000)
+    search = (
+        r":(?:HGT|TMP|UGRD|VGRD|RH):"
+        r"(?:100|150|200|250|300|400|500|700|850|1000) mb:"
+    )
 
     def __init__(
         self,
@@ -108,6 +125,10 @@ class _HerbiePressureProvider:
         self._dataset: Any | None = None
         self._herbie: Any | None = None
         self._cycle: datetime | None = None
+        self._checksums: dict[str, str] | None = None
+        self._grid_tree: Any | None = None
+        self._grid_shape: tuple[int, ...] | None = None
+        self._grid_dims: tuple[str, ...] | None = None
 
     @staticmethod
     def _variable(dataset: Any, *names: str) -> Any:
@@ -163,33 +184,134 @@ class _HerbiePressureProvider:
                 xr = import_module("xarray")
             except ImportError as exc:
                 raise RuntimeError("install MachLane's 'full' extra to merge model fields") from exc
-            dataset = xr.merge(dataset, join="inner", compat="override")
+            dataset = xr.merge(
+                dataset,
+                join="exact",
+                compat="override",
+                combine_attrs="override",
+            )
             if not dataset.sizes.get("isobaricInhPa", 0):
                 raise ValueError("weather variables have no common pressure levels")
+        # cfgrib arrays are lazy. Route sampling touches many different grid cells, so retaining
+        # the compact selected pressure-level subset in memory avoids re-decoding GRIB messages
+        # once per point.
+        load = getattr(dataset, "load", None)
+        if callable(load):
+            load()
         self._dataset = dataset
         self._herbie = herbie
         self._cycle = cycle
         return dataset, cycle
 
-    def profile(
-        self, latitude: float, longitude: float, valid_time: datetime
-    ) -> AtmosphericProfile:
+    def _validate_request(self, valid_time: datetime) -> None:
         if not self.network_enabled:
             raise RuntimeError(
                 f"{self.name} network access is disabled; enable it explicitly and configure credentials/cache"
             )
         if os.getenv("MACHLANE_NETWORK_DISABLED") == "1":
             raise RuntimeError("network access is disabled by MACHLANE_NETWORK_DISABLED")
+
+    def _select_points(self, dataset: Any, points: list[tuple[float, float]]) -> Any:
+        """Select nearest model cells in one vectorized operation.
+
+        Regular GEFS coordinates use xarray's indexed selection. HRRR has a curvilinear
+        two-dimensional grid, so a cached spherical KD-tree avoids rebuilding Herbie's
+        point matcher for every planner stage.
+        """
+
+        try:
+            xr = import_module("xarray")
+        except ImportError as exc:
+            raise RuntimeError("install MachLane's 'full' extra to select model points") from exc
+        coordinates = getattr(dataset, "coords", {})
+        latitude_name = next(
+            (name for name in ("latitude", "lat") if name in coordinates), None
+        )
+        longitude_name = next(
+            (name for name in ("longitude", "lon") if name in coordinates), None
+        )
+        if latitude_name is None or longitude_name is None:
+            point_frame = pd.DataFrame(
+                {
+                    "latitude": [latitude_value for latitude_value, _ in points],
+                    "longitude": [longitude_value for _, longitude_value in points],
+                    "stid": [
+                        "MACHLANE" if len(points) == 1 else f"MACHLANE-{index:04d}"
+                        for index in range(len(points))
+                    ],
+                }
+            )
+            return dataset.herbie.pick_points(point_frame)
+        latitude = np.asarray(coordinates[latitude_name].values, dtype=float)
+        longitude = np.asarray(coordinates[longitude_name].values, dtype=float)
+        target_latitude = [latitude_value for latitude_value, _ in points]
+        target_longitude = [longitude_value for _, longitude_value in points]
+        if latitude.ndim == longitude.ndim == 1:
+            return dataset.sel(
+                {
+                    latitude_name: xr.DataArray(target_latitude, dims="point"),
+                    longitude_name: xr.DataArray(target_longitude, dims="point"),
+                },
+                method="nearest",
+            )
+        if latitude.shape != longitude.shape or latitude.ndim != 2:
+            raise ValueError("weather grid latitude/longitude coordinates do not align")
+        if self._grid_tree is None:
+            try:
+                cKDTree = import_module("scipy.spatial").cKDTree
+            except ImportError as exc:
+                raise RuntimeError("install MachLane's 'full' extra to select HRRR points") from exc
+
+            def unit_sphere(
+                latitudes: np.ndarray[Any, np.dtype[np.float64]],
+                longitudes: np.ndarray[Any, np.dtype[np.float64]],
+            ) -> np.ndarray[Any, np.dtype[np.float64]]:
+                latitude_rad = np.radians(latitudes)
+                longitude_rad = np.radians(longitudes)
+                return np.column_stack(
+                    (
+                        np.cos(latitude_rad) * np.cos(longitude_rad),
+                        np.cos(latitude_rad) * np.sin(longitude_rad),
+                        np.sin(latitude_rad),
+                    )
+                )
+
+            self._grid_tree = cKDTree(unit_sphere(latitude.ravel(), longitude.ravel()))
+            self._grid_shape = latitude.shape
+            self._grid_dims = tuple(coordinates[latitude_name].dims)
+        if self._grid_shape is None or self._grid_dims is None:
+            raise RuntimeError("weather grid index metadata was not retained")
+        target_latitude_array = np.asarray(target_latitude)
+        target_longitude_array = np.asarray(target_longitude)
+        target_latitude_rad = np.radians(target_latitude_array)
+        target_longitude_rad = np.radians(target_longitude_array)
+        target_xyz = np.column_stack(
+            (
+                np.cos(target_latitude_rad) * np.cos(target_longitude_rad),
+                np.cos(target_latitude_rad) * np.sin(target_longitude_rad),
+                np.sin(target_latitude_rad),
+            )
+        )
+        _, flat_indices = self._grid_tree.query(target_xyz)
+        row_indices, column_indices = np.unravel_index(flat_indices, self._grid_shape)
+        return dataset.isel(
+            {
+                self._grid_dims[0]: xr.DataArray(row_indices, dims="point"),
+                self._grid_dims[1]: xr.DataArray(column_indices, dims="point"),
+            }
+        )
+
+    def _profile_from_point(
+        self,
+        point: Any,
+        *,
+        latitude: float,
+        longitude: float,
+        valid_time: datetime,
+        cycle: datetime,
+    ) -> AtmosphericProfile:
         if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
             raise ValueError("latitude/longitude are outside valid ranges")
-        dataset, cycle = self._load(valid_time)
-        point_frame = pd.DataFrame(
-            {"latitude": [latitude], "longitude": [longitude], "stid": ["MACHLANE"]}
-        )
-        try:
-            point = dataset.herbie.pick_points(point_frame).isel(point=0)
-        except (AttributeError, KeyError, ValueError) as exc:
-            raise ValueError("Herbie could not extract the requested point from this grid") from exc
         altitude = np.asarray(self._variable(point, "gh", "hgt").values, dtype=float).reshape(-1)
         temperature = np.asarray(self._variable(point, "t", "tmp").values, dtype=float).reshape(-1)
         zonal = np.asarray(self._variable(point, "u", "ugrd").values, dtype=float).reshape(-1)
@@ -215,8 +337,11 @@ class _HerbiePressureProvider:
         order = np.argsort(altitude)
         if self._herbie is None:
             raise RuntimeError("Herbie request metadata was not retained")
-        local_path = Path(self._herbie.get_localFilePath(self.search))
-        checksums = {local_path.name: sha256_file(local_path)} if local_path.exists() else {}
+        if self._checksums is None:
+            local_path = Path(self._herbie.get_localFilePath(self.search))
+            self._checksums = (
+                {local_path.name: sha256_file(local_path)} if local_path.exists() else {}
+            )
         remote = str(getattr(self._herbie, "grib", "")) or None
         resolved_member = str(getattr(self._herbie, "member", "") or "") or None
         return AtmosphericProfile(
@@ -246,10 +371,44 @@ class _HerbiePressureProvider:
                 vertical_interpolation="native pressure levels; no interpolation",
                 retrieved_at=datetime.now(UTC),
                 source_url=remote,
-                checksums=checksums,
+                checksums=self._checksums,
                 label="REAL_MODEL_DATA_UNVALIDATED_FOR_OPERATIONAL_USE",
             ),
         )
+
+    def profiles(
+        self,
+        points: list[tuple[float, float]],
+        valid_time: datetime,
+    ) -> tuple[AtmosphericProfile, ...]:
+        """Extract many route columns in one nearest-grid operation."""
+
+        self._validate_request(valid_time)
+        if not points:
+            return ()
+        for latitude, longitude in points:
+            if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+                raise ValueError("latitude/longitude are outside valid ranges")
+        dataset, cycle = self._load(valid_time)
+        try:
+            selected = self._select_points(dataset, points)
+        except (AttributeError, KeyError, ValueError) as exc:
+            raise ValueError("MachLane could not extract the requested points from this grid") from exc
+        return tuple(
+            self._profile_from_point(
+                selected.isel(point=index),
+                latitude=latitude,
+                longitude=longitude,
+                valid_time=valid_time,
+                cycle=cycle,
+            )
+            for index, (latitude, longitude) in enumerate(points)
+        )
+
+    def profile(
+        self, latitude: float, longitude: float, valid_time: datetime
+    ) -> AtmosphericProfile:
+        return self.profiles([(latitude, longitude)], valid_time)[0]
 
 
 class HerbieHRRRProvider(_HerbiePressureProvider):

@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from open_mco.atmosphere import AtmosphereProvider, SyntheticAtmosphereProvider
+from open_mco.atmosphere import (
+    AtmosphereProvider,
+    SyntheticAtmosphereProvider,
+    profiles_at_points,
+)
 from open_mco.compliance import write_evidence_package
 from open_mco.models import (
     AircraftModel,
@@ -24,6 +28,7 @@ from open_mco.physics import MockMCOEngine
 from open_mco.route import (
     WeatherRegimeSummary,
     WeatherSegmentationSettings,
+    coarsen_route_for_weather,
     get_mission,
     interpolate_position,
     interpolate_segment_position,
@@ -35,8 +40,12 @@ from open_mco.terrain import FlatTerrainProvider
 DEMO_VALID_TIME = datetime(2026, 8, 3, 12, tzinfo=UTC)
 DEMO_MACH_VALUES = (1.02, 1.05, 1.08, 1.10, 1.12, 1.15)
 DEMO_ALTITUDES_M = (12_192, 12_802, 13_411, 14_021, 14_630, 15_240)
-DEMO_WEATHER_SAMPLE_SPACING_M = 185_200
-DEMO_WEATHER_SETTINGS = WeatherSegmentationSettings()
+DEMO_WEATHER_SAMPLE_SPACING_M = 40_233.6  # 25 statute miles
+DEMO_WEATHER_SETTINGS = WeatherSegmentationSettings(
+    temperature_change_k=1.1,  # approximately 2 °F
+    pressure_change_hpa=1.0,  # approximately 0.03 inHg
+    wind_vector_change_mps=2.6,  # approximately 5 kt
+)
 
 
 @dataclass(frozen=True)
@@ -113,26 +122,32 @@ def build_demo_scenario(
     route_override: Route | None = None,
     atmosphere_provider: AtmosphereProvider | None = None,
     valid_time: datetime = DEMO_VALID_TIME,
+    weather_sample_spacing_m: float = DEMO_WEATHER_SAMPLE_SPACING_M,
+    weather_settings: WeatherSegmentationSettings = DEMO_WEATHER_SETTINGS,
 ) -> DemoScenario:
     """Build a scenario through an injectable atmosphere-provider boundary."""
 
     aircraft = synthetic_aircraft()
     weather = atmosphere_provider or SyntheticAtmosphereProvider()
     if route_override is None:
-        sampled_route = get_mission(mission_id).build_route(spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M)
+        sampled_route = get_mission(mission_id).build_route(spacing_m=weather_sample_spacing_m)
     else:
-        sampled_route = route_from_waypoints(
+        densified_route = route_from_waypoints(
             route_override.waypoints,
-            spacing_m=DEMO_WEATHER_SAMPLE_SPACING_M,
+            spacing_m=weather_sample_spacing_m,
             name=route_override.name,
             source=route_override.source,
             observations=route_override.observations,
+        )
+        sampled_route = coarsen_route_for_weather(
+            densified_route,
+            weather_sample_spacing_m,
         )
     route, weather_regimes = segment_route_by_weather(
         sampled_route,
         weather,
         valid_time,
-        settings=DEMO_WEATHER_SETTINGS,
+        settings=weather_settings,
     )
     terrain_provider = FlatTerrainProvider()
     planner = GridSearchPlanner(
@@ -149,9 +164,10 @@ def build_demo_scenario(
         valid_time=valid_time,
     )
     midpoint_latitude, midpoint_longitude = interpolate_position(route, 0.5)
-    segment_atmospheres = tuple(
-        weather.profile(*interpolate_segment_position(segment), valid_time)
-        for segment in route.segments
+    segment_atmospheres = profiles_at_points(
+        weather,
+        [interpolate_segment_position(segment) for segment in route.segments],
+        valid_time,
     )
     return DemoScenario(
         aircraft=aircraft,

@@ -9,8 +9,8 @@ from datetime import datetime
 import numpy as np
 from pyproj import Geod
 
-from open_mco.atmosphere import AtmosphereProvider
-from open_mco.models import Route, RouteSegment
+from open_mco.atmosphere import AtmosphereProvider, profiles_at_points
+from open_mco.models import AtmosphericProfile, Route, RouteSegment
 
 _GEOD = Geod(ellps="WGS84")
 
@@ -64,19 +64,61 @@ class _WeatherSample:
     meridional_wind_mps: float
 
 
+def coarsen_route_for_weather(route: Route, sample_spacing_m: float) -> Route:
+    """Group dense observed-track legs into sampling cells while retaining every bend."""
+
+    if sample_spacing_m <= 0:
+        raise ValueError("weather sample spacing must be positive")
+    groups: list[list[RouteSegment]] = []
+    active: list[RouteSegment] = []
+    active_distance = 0.0
+    for segment in route.segments:
+        if active and active_distance + segment.distance_m > sample_spacing_m:
+            groups.append(active)
+            active = []
+            active_distance = 0.0
+        active.append(segment)
+        active_distance += segment.distance_m
+    if active:
+        groups.append(active)
+
+    def retained_path(group: list[RouteSegment]) -> tuple[tuple[float, float], ...]:
+        points: list[tuple[float, float]] = []
+        for segment in group:
+            segment_points = segment.path or (
+                (segment.start_latitude, segment.start_longitude),
+                (segment.end_latitude, segment.end_longitude),
+            )
+            points.extend(segment_points if not points else segment_points[1:])
+        return tuple(points)
+
+    cells = tuple(
+        RouteSegment(
+            segment_id=f"W{index + 1:04d}",
+            start_latitude=group[0].start_latitude,
+            start_longitude=group[0].start_longitude,
+            end_latitude=group[-1].end_latitude,
+            end_longitude=group[-1].end_longitude,
+            distance_m=sum(segment.distance_m for segment in group),
+            bearing_deg=group[0].bearing_deg,
+            path=retained_path(group),
+        )
+        for index, group in enumerate(groups)
+    )
+    return Route(
+        name=f"{route.name} · weather sampling cells",
+        waypoints=route.waypoints,
+        segments=cells,
+        source=route.source,
+        observations=route.observations,
+    )
+
+
 def _sample_segment(
     segment: RouteSegment,
-    provider: AtmosphereProvider,
-    valid_time: datetime,
+    profile: AtmosphericProfile,
     altitude_m: float,
 ) -> _WeatherSample:
-    longitude, latitude, _ = _GEOD.fwd(
-        segment.start_longitude,
-        segment.start_latitude,
-        segment.bearing_deg,
-        segment.distance_m / 2,
-    )
-    profile = provider.profile(latitude, longitude, valid_time)
     return _WeatherSample(
         segment=segment,
         temperature_k=float(np.interp(altitude_m, profile.altitude_m, profile.temperature_k)),
@@ -130,14 +172,23 @@ def segment_route_by_weather(
     """Merge fine geodesic samples while atmosphere characteristics remain uniform."""
 
     active_settings = settings or WeatherSegmentationSettings()
+    sample_points = []
+    for segment in sampled_route.segments:
+        longitude, latitude, _ = _GEOD.fwd(
+            segment.start_longitude,
+            segment.start_latitude,
+            segment.bearing_deg,
+            segment.distance_m / 2,
+        )
+        sample_points.append((latitude, longitude))
+    profiles = profiles_at_points(provider, sample_points, valid_time)
     samples = [
         _sample_segment(
             segment,
-            provider,
-            valid_time,
+            profile,
             active_settings.altitude_m,
         )
-        for segment in sampled_route.segments
+        for segment, profile in zip(sampled_route.segments, profiles, strict=True)
     ]
     grouped_samples: list[list[_WeatherSample]] = []
     boundary_reasons = ["Departure / initial weather regime"]

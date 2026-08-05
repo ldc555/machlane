@@ -13,8 +13,10 @@ from open_mco.models import AtmosphericProfile, PlannerResult, Route
 from open_mco.route import corridor_geojson, interpolate_position
 
 METERS_TO_FEET = 3.280839895
+METERS_TO_MILES = 1 / 1609.344
 METERS_TO_NAUTICAL_MILES = 1 / 1852
 METERS_PER_SECOND_TO_KNOTS = 1.943844492
+PASCALS_TO_INHG = 1 / 3386.389
 
 
 def pressure_color(value_hpa: float, minimum_hpa: float, maximum_hpa: float) -> list[int]:
@@ -30,15 +32,15 @@ def pressure_color(value_hpa: float, minimum_hpa: float, maximum_hpa: float) -> 
         blend = (fraction - 0.5) * 2
         start, end = (226, 232, 240), (220, 38, 38)
     return [
-        round(left + (right - left) * blend)
-        for left, right in zip(start, end, strict=True)
+        round(left + (right - left) * blend) for left, right in zip(start, end, strict=True)
     ] + [225]
 
 
 def mock_flight_state(
     progress: float,
     *,
-    route_distance_nmi: float,
+    route_distance_miles: float | None = None,
+    route_distance_nmi: float | None = None,
     cruise_mach: float,
     cruise_altitude_ft: float,
 ) -> dict[str, float | str | bool]:
@@ -49,55 +51,55 @@ def mock_flight_state(
     still unavailable.
     """
 
-    if route_distance_nmi <= 0:
+    if route_distance_miles is None:
+        if route_distance_nmi is None:
+            raise ValueError("route distance is required")
+        route_distance_miles = route_distance_nmi / METERS_TO_NAUTICAL_MILES * METERS_TO_MILES
+    if route_distance_miles <= 0:
         raise ValueError("route distance must be positive")
     bounded = min(1.0, max(0.0, progress))
-    distance_nmi = bounded * route_distance_nmi
-    remaining_nmi = route_distance_nmi - distance_nmi
-    transition_end_nmi = min(180.0, route_distance_nmi / 2)
-    climb_end_nmi = transition_end_nmi * (2 / 3)
-    initial_climb_end_nmi = transition_end_nmi / 9
+    distance_miles = bounded * route_distance_miles
+    remaining_miles = route_distance_miles - distance_miles
+    transition_end_miles = min(210.0, route_distance_miles / 2)
+    climb_end_miles = transition_end_miles * (2 / 3)
+    initial_climb_end_miles = transition_end_miles / 9
 
     def interpolate(start: float, end: float, fraction: float) -> float:
         return start + (end - start) * min(1.0, max(0.0, fraction))
 
-    if distance_nmi < initial_climb_end_nmi:
-        local = distance_nmi / initial_climb_end_nmi
+    if distance_miles < initial_climb_end_miles:
+        local = distance_miles / initial_climb_end_miles
         phase = "Takeoff / initial climb"
         mach = interpolate(0.20, 0.45, local)
         altitude_ft = interpolate(0, 10_000, local)
-    elif distance_nmi < climb_end_nmi:
-        local = (distance_nmi - initial_climb_end_nmi) / (
-            climb_end_nmi - initial_climb_end_nmi
+    elif distance_miles < climb_end_miles:
+        local = (distance_miles - initial_climb_end_miles) / (
+            climb_end_miles - initial_climb_end_miles
         )
         phase = "Climb"
         mach = interpolate(0.45, 0.78, local)
         altitude_ft = interpolate(10_000, 45_000, local)
-    elif distance_nmi < transition_end_nmi:
-        local = (distance_nmi - climb_end_nmi) / (transition_end_nmi - climb_end_nmi)
+    elif distance_miles < transition_end_miles:
+        local = (distance_miles - climb_end_miles) / (transition_end_miles - climb_end_miles)
         phase = "Transonic acceleration"
         mach = interpolate(0.78, cruise_mach, local)
         altitude_ft = interpolate(45_000, cruise_altitude_ft, local)
-    elif remaining_nmi >= transition_end_nmi:
+    elif remaining_miles >= transition_end_miles:
         phase = "Supersonic cruise"
         mach = cruise_mach
         altitude_ft = cruise_altitude_ft
-    elif remaining_nmi >= climb_end_nmi:
-        local = (transition_end_nmi - remaining_nmi) / (
-            transition_end_nmi - climb_end_nmi
-        )
+    elif remaining_miles >= climb_end_miles:
+        local = (transition_end_miles - remaining_miles) / (transition_end_miles - climb_end_miles)
         phase = "Supersonic deceleration"
         mach = interpolate(cruise_mach, 0.78, local)
         altitude_ft = interpolate(cruise_altitude_ft, 45_000, local)
-    elif remaining_nmi >= initial_climb_end_nmi:
-        local = (climb_end_nmi - remaining_nmi) / (
-            climb_end_nmi - initial_climb_end_nmi
-        )
+    elif remaining_miles >= initial_climb_end_miles:
+        local = (climb_end_miles - remaining_miles) / (climb_end_miles - initial_climb_end_miles)
         phase = "Descent"
         mach = interpolate(0.78, 0.45, local)
         altitude_ft = interpolate(45_000, 10_000, local)
     else:
-        local = (initial_climb_end_nmi - remaining_nmi) / initial_climb_end_nmi
+        local = (initial_climb_end_miles - remaining_miles) / initial_climb_end_miles
         phase = "Approach / landing"
         mach = interpolate(0.45, 0.20, local)
         altitude_ft = interpolate(10_000, 0, local)
@@ -125,12 +127,13 @@ def atmosphere_metrics(
     zonal_mps = float(np.interp(altitude_m, profile.altitude_m, profile.zonal_wind_mps))
     meridional_mps = float(np.interp(altitude_m, profile.altitude_m, profile.meridional_wind_mps))
     return {
+        "temperature_k": temperature_k,
+        "temperature_f": (temperature_k - 273.15) * 9 / 5 + 32,
         "temperature_c": temperature_k - 273.15,
+        "pressure_inhg": pressure_pa * PASCALS_TO_INHG,
         "pressure_hpa": pressure_pa / 100,
         "wind_speed_kt": math.hypot(zonal_mps, meridional_mps) * METERS_PER_SECOND_TO_KNOTS,
-        "along_wind_kt": project_wind_onto_bearing(
-            zonal_mps, meridional_mps, bearing_deg
-        )
+        "along_wind_kt": project_wind_onto_bearing(zonal_mps, meridional_mps, bearing_deg)
         * METERS_PER_SECOND_TO_KNOTS,
     }
 
@@ -146,25 +149,26 @@ def mock_live_metrics(
     """
 
     bounded = min(1.0, max(0.0, progress))
-    phases = [
-        byte / 255 * 2 * math.pi
-        for byte in hashlib.sha256(mission_id.encode()).digest()[:8]
-    ]
+    phases = [byte / 255 * 2 * math.pi for byte in hashlib.sha256(mission_id.encode()).digest()[:8]]
 
     def variation(primary: int, secondary: int, cycles: float) -> float:
         angle = bounded * cycles * 2 * math.pi
-        return math.sin(angle + phases[primary]) + 0.35 * math.sin(
-            angle * 2.3 + phases[secondary]
-        )
+        return math.sin(angle + phases[primary]) + 0.35 * math.sin(angle * 2.3 + phases[secondary])
 
+    baseline_temperature_c = baseline["temperature_c"]
+    baseline_temperature_k = baseline.get("temperature_k", baseline_temperature_c + 273.15)
+    baseline_temperature_f = baseline.get("temperature_f", baseline_temperature_c * 9 / 5 + 32)
+    baseline_pressure_hpa = baseline["pressure_hpa"]
+    baseline_pressure_inhg = baseline.get(
+        "pressure_inhg", baseline_pressure_hpa * 100 * PASCALS_TO_INHG
+    )
     return {
-        "pressure_hpa": max(
-            0.0, baseline["pressure_hpa"] + 1.6 * variation(0, 1, 2.4)
-        ),
-        "temperature_c": baseline["temperature_c"] + 0.9 * variation(2, 3, 1.7),
-        "wind_speed_kt": max(
-            0.0, baseline["wind_speed_kt"] + 3.8 * variation(4, 5, 2.8)
-        ),
+        "temperature_k": baseline_temperature_k + 0.9 * variation(2, 3, 1.7),
+        "temperature_f": baseline_temperature_f + 1.6 * variation(2, 3, 1.7),
+        "pressure_hpa": max(0.0, baseline_pressure_hpa + 1.6 * variation(0, 1, 2.4)),
+        "pressure_inhg": max(0.0, baseline_pressure_inhg + 0.047 * variation(0, 1, 2.4)),
+        "temperature_c": baseline_temperature_c + 0.9 * variation(2, 3, 1.7),
+        "wind_speed_kt": max(0.0, baseline["wind_speed_kt"] + 3.8 * variation(4, 5, 2.8)),
         "along_wind_kt": baseline["along_wind_kt"] + 3.2 * variation(6, 7, 2.1),
     }
 
@@ -182,9 +186,7 @@ def active_segment_index(route: Route, progress: float) -> int:
     return len(route.segments) - 1
 
 
-def aircraft_view(
-    route: Route, progress: float, longitude_reference: float
-) -> dict[str, float]:
+def aircraft_view(route: Route, progress: float, longitude_reference: float) -> dict[str, float]:
     """Resolve the aircraft marker position and WGS-84 track bearing at a progress fraction.
 
     Position and bearing are taken from the existing geodesic route interpolation, so this never
@@ -210,6 +212,7 @@ def segment_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
     _, longitude_reference = interpolate_position(route, 0.5)
     for segment, limit in zip(route.segments, result.segment_limits, strict=True):
         start_km = cumulative_m / 1000
+        start_mi = cumulative_m * METERS_TO_MILES
         start_nmi = cumulative_m * METERS_TO_NAUTICAL_MILES
         cumulative_m += segment.distance_m
         accepted = sum(candidate.accepted for candidate in limit.candidate_evaluations)
@@ -223,12 +226,16 @@ def segment_rows(route: Route, result: PlannerResult) -> list[dict[str, Any]]:
             ),
             None,
         )
-        metrics = {} if selected is None or selected.propagation is None else selected.propagation.metrics
+        metrics = (
+            {} if selected is None or selected.propagation is None else selected.propagation.metrics
+        )
         rows.append(
             {
                 "segment": segment.segment_id,
                 "start_km": round(start_km, 1),
                 "end_km": round(cumulative_m / 1000, 1),
+                "start_mi": round(start_mi, 1),
+                "end_mi": round(cumulative_m * METERS_TO_MILES, 1),
                 "start_nmi": round(start_nmi, 1),
                 "end_nmi": round(cumulative_m * METERS_TO_NAUTICAL_MILES, 1),
                 "path": [

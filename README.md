@@ -232,14 +232,19 @@ excluded because no observed route was available for the requested test. LAX–N
 U.S.–Japan search instead, and still fails closed if OpenSky has no observation in the selected
 lookback window.
 
-After a track loads, pressure, temperature and wind split its geometry into variable-length
-atmospheric regimes. The current mock segmentation starts a new regime after a 1 hPa flight-level
-pressure change, a 0.7 K temperature change, or a 2.5 m/s wind-vector change. Those thresholds are
-test fixtures, not validated operational margins. The segmentation receives atmosphere through a
-provider interface, so the same observed geometry can later use HRRR over CONUS and GEFS for global
-and oceanic coverage without changing the route or planner contracts. Each regime retains the full
-OpenSky polyline and along-track distance; it is never replaced by a direct chord between weather
-boundaries.
+After a track loads, the UI offers either a labeled mock atmosphere or a route-aligned archived NOAA
+snapshot. It uses HRRR for a fully CONUS mission and GEFS control member 0 for oceanic/global
+missions. The valid hour is the observed OpenSky flight's midpoint rounded down to the whole UTC
+hour. HRRR uses the analysis at that hour; GEFS uses the preceding six-hour cycle plus the forecast
+lead that produces the same valid hour. This is real historical model data aligned to the observed
+day, not a current forecast and not a time-evolving atmosphere over the whole flight.
+
+Pressure, temperature and wind split the observed geometry into variable-length macro areas. The
+default Balanced preset samples every 25 statute miles and starts a new area after approximately
+2 °F, 0.03 inHg, or 5 knots of wind-vector change. Tight and Broad presets are also available.
+These are transparent research grouping controls, not validated operational margins. Each area
+retains the full OpenSky polyline and along-track distance; it is never replaced by a direct chord
+between weather boundaries.
 
 The map's blue-to-red centerline shows **ambient pressure at the planner altitude**. It does not show
 a sonic-boom footprint. Atmospheric regimes use a thin colored line on the retained OpenSky
@@ -287,8 +292,8 @@ until the aircraft performance model is integrated segment-by-segment with those
 | Source | Current status | Boundary |
 |---|---|---|
 | OpenSky | Implemented: OAuth2, token refresh, seven-day airport-pair lookup, track normalization, private local cache, provenance and rate-limit errors | Recent experimental observations only; no weather fields |
-| HRRR | Fetch and normalization implemented | Not yet wired into the validated planner |
-| GEFS | Member-aware fetch and normalization implemented | Ensemble interpretation still requires validation |
+| HRRR | Selectable in the UI after an OpenSky track loads; archived pressure-level data are aligned to the observed flight midpoint and cached locally | CONUS only; current run is one coherent snapshot, not a time-evolving forecast |
+| GEFS | Selectable automatically for oceanic/global routes; control member is aligned to the observed valid hour and cached locally | Ensemble uncertainty is not yet run across all members or validated |
 | ERA5 | Credential-gated fetch implemented | Historical only |
 | USGS 3DEP | Route-profile fetch implemented | U.S. land coverage only |
 | Sonic-boom propagation | Interface and validation boundaries implemented | Physical engine not selected or validated |
@@ -423,12 +428,12 @@ open-mco demo
 
 ### Open the user interface
 
-The map-first workspace keeps only the observed route, phase-aware mock aircraft state, mock
-atmospheric corridor, and calculation readiness in the primary view. Aviation distances are
-displayed primarily in nautical miles. Moving the aircraft updates its phase and local atmosphere
-without recomputing the cached route plan. The phase fixture keeps takeoff, climb, and landing
-subsonic; acceleration to the mock supersonic cruise occurs only after climb, with deceleration and
-descent before arrival.
+The map-first workspace keeps the observed route, route-aligned atmosphere, phase-aware aircraft
+fixture, and calculation readiness in the primary view. Presentation and CSV downloads use statute
+miles, feet, knots, °F, and inHg; normalized domain models remain SI internally. Moving the aircraft
+updates its phase and local atmosphere without recomputing the cached route plan. The phase buttons
+jump directly to takeoff, climb, acceleration, cruise, descent, or landing. This phase schedule is a
+UI fixture until reviewed STCA performance data replace it.
 
 To make OpenSky the route source, create an API client on the OpenSky account page and export the two
 values in the same Terminal session before starting Streamlit:
@@ -447,6 +452,18 @@ current Streamlit session, and reuses its private local cache after restart. Use
 route** only when another request is needed. If no track exists, choose another pair or end date; the
 planner remains paused.
 
+After the OpenSky route appears:
+
+1. Leave **Atmosphere source** on **Mock** for a network-free UI test.
+2. Select **NOAA archived** to fetch the model snapshot that matches the observed flight day and
+   midpoint hour. No NOAA API key is required.
+3. Use **HRRR** automatically for DFW–JFK, DFW–LAX, or LAX–JFK; oceanic/global missions select
+   **GEFS** automatically.
+4. Choose the **Balanced** macro-area tolerance first. Tight creates more, smaller atmospheric
+   areas; Broad creates fewer, larger areas.
+5. The first NOAA load can take time and disk space. Herbie reuses `data/cache/herbie/` on later
+   runs. If retrieval fails, the UI stops and asks you to choose Mock—it never silently swaps data.
+
 ```bash
 open-mco ui
 ```
@@ -460,9 +477,9 @@ streamlit run src/open_mco/ui/app.py
 ### Fetch reviewed real-data inputs
 
 Weather and terrain retrieval are separate explicit steps. OpenSky supplies route observations only;
-it does not supply weather. The UI segments a loaded observed route with clearly labeled mock
-atmosphere today, and the injected atmosphere-provider boundary is ready for HRRR/GEFS wiring. None
-of this changes the `NOT_MODELED` boom status.
+it does not supply weather. The UI now segments a loaded observed route with either the labeled mock
+provider or a same-day archived HRRR/GEFS snapshot. None of this changes the `NOT_MODELED` boom
+status.
 
 ```bash
 open-mco fetch-weather \
@@ -501,10 +518,11 @@ open-mco fetch-route \
   --output data/processed/opensky_dfw_jfk.json
 ```
 
-Each weather command downloads only the requested GRIB pressure-level fields, not a whole model
-file. Large source files and generated profiles stay out of Git. HRRR, GEFS, ERA5, and 3DEP are
-fetch paths; they are not yet wired into an end-to-end validated planner run. ERA5 requires an
-accepted CDS dataset licence and the user's own `~/.cdsapirc`; credentials are never stored here.
+Each weather command downloads only the selected GRIB pressure-level messages, not every variable
+in the source model file. Large source files and generated profiles stay out of Git. HRRR and GEFS
+can feed the current unvalidated planner run; they do not make its mock propagation equation real.
+ERA5 requires an accepted CDS dataset licence and the user's own `~/.cdsapirc`; credentials are
+never stored here.
 
 ### Run quality checks
 
