@@ -110,8 +110,8 @@ class OpenSkyTrackProvider:
         callsign = str(
             track.get("callsign") or track.get("calllsign") or flight.get("callsign") or ""
         ).strip()
-        observed_start = datetime.fromtimestamp(int(track.get("startTime", first_seen)), tz=UTC)
-        observed_end = datetime.fromtimestamp(int(track.get("endTime", last_seen)), tz=UTC)
+        observed_start = observations[0].timestamp
+        observed_end = observations[-1].timestamp
         flight_id = f"{icao24}:{first_seen}"
         source_url = f"{self.api_base_url}/tracks/all?icao24={icao24}&time={track_time}"
         return route_from_waypoints(
@@ -326,6 +326,7 @@ class OpenSkyTrackProvider:
             raise ValueError("OpenSky track contains fewer than two usable trajectory points")
         if len(observations) > 2_000:
             raise ValueError("OpenSky track exceeds the 2,000-waypoint safety limit")
+        observations.sort(key=lambda observation: observation.timestamp)
         return observations
 
     @staticmethod

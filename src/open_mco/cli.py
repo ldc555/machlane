@@ -265,7 +265,7 @@ def report(run_id: str) -> None:
 
 @app.command()
 def ui() -> None:
-    """Launch the Streamlit synthetic demonstration."""
+    """Launch the fail-closed real-data mission workspace."""
 
     command = [sys.executable, "-m", "streamlit", "run", "src/open_mco/ui/app.py"]
     raise typer.Exit(subprocess.call(command))

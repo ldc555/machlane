@@ -1,12 +1,13 @@
-"""Map-first mission workspace for observed routes and route-aligned atmosphere."""
+"""Real-data-only mission workspace for MachLane."""
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -15,20 +16,14 @@ import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
 
-from open_mco.atmosphere import (
-    SyntheticAtmosphereProvider,
-    build_noaa_provider,
-    plan_noaa_atmosphere,
-)
-from open_mco.compliance import compliance_matrix, write_evidence_package
-from open_mco.demo import build_demo_scenario
+from open_mco.mission_analysis import RealMissionAnalysis, build_real_mission_analysis
 from open_mco.models import Route
 from open_mco.route import (
-    AIRPORT_SOURCE_RETRIEVED,
-    AIRPORT_SOURCE_URL,
+    AUTOMATIC_WEATHER_POLICY_VERSION,
+    AUTOMATIC_WEATHER_SAMPLE_SPACING_M,
+    AUTOMATIC_WEATHER_SETTINGS,
     OpenSkyRouteCache,
     OpenSkyTrackProvider,
-    WeatherSegmentationSettings,
     get_mission,
     interpolate_position,
     list_missions,
@@ -42,19 +37,15 @@ from open_mco.ui.view_model import (
     aircraft_view,
     atmosphere_metrics,
     display_longitude,
-    mock_flight_state,
-    mock_live_metrics,
+    observed_flight_state,
     pressure_color,
-    segment_rows,
 )
 
-OPENSKY_LOOKBACK_DAYS = 7
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OPENSKY_CACHE = OpenSkyRouteCache(PROJECT_ROOT / "data/cache/opensky_routes")
+OPENSKY_LOOKBACK_DAYS = 7
+ANALYSIS_CACHE_SCHEMA = "real-spacetime-noaa-3dep-v2-sparse-preview"
 
-# Streamlit renamed ``experimental_fragment`` to ``fragment`` in 1.37. Prefer the stable name, fall
-# back to the experimental one, and degrade to a no-op decorator on older pins (the page simply
-# reruns in full, exactly as before, so nothing breaks — dragging is just less responsive).
 _FragmentFunc = TypeVar("_FragmentFunc", bound=Callable[..., Any])
 
 
@@ -68,8 +59,202 @@ fragment: Any = (
     or _identity_fragment
 )
 
+
+def _credential(name: str) -> str | None:
+    value = os.getenv(name)
+    if value:
+        return value
+    try:
+        secret = st.secrets.get(name)
+    except (FileNotFoundError, KeyError):
+        return None
+    return str(secret) if secret else None
+
+
+@st.cache_resource(show_spinner=False)
+def _analyze_real_route(
+    mission_id: str,
+    route_json: str,
+    cache_schema: str,
+) -> RealMissionAnalysis:
+    """Build one fail-closed real mission and cache its decoded model grids."""
+
+    del cache_schema
+    route = Route.model_validate_json(route_json)
+    mission = get_mission(mission_id)
+    return build_real_mission_analysis(
+        route,
+        mission.domain,
+        weather_cache_dir=PROJECT_ROOT / "data/cache/herbie",
+        terrain_cache_dir=PROJECT_ROOT / "data/cache/3dep",
+        network_enabled=True,
+    )
+
+
+def _load_or_fetch_route(
+    mission_id: str,
+    search_date: date,
+    *,
+    force_refresh: bool,
+) -> Route:
+    mission = get_mission(mission_id)
+    if not force_refresh:
+        cached = OPENSKY_CACHE.load(
+            mission_id,
+            search_date,
+            origin_icao=mission.origin.icao,
+            destination_icao=mission.destination.icao,
+        )
+        if cached is not None:
+            return cached
+    provider = OpenSkyTrackProvider(
+        network_enabled=True,
+        client_id=_credential("OPENSKY_CLIENT_ID"),
+        client_secret=_credential("OPENSKY_CLIENT_SECRET"),
+    )
+    search_end = datetime.combine(search_date, time.max, tzinfo=UTC)
+    route = provider.recent_route_for_airports(
+        mission.origin,
+        mission.destination,
+        on_or_before=search_end,
+        lookback_days=OPENSKY_LOOKBACK_DAYS,
+    )
+    OPENSKY_CACHE.save(mission_id, search_date, route)
+    return route
+
+
+def _imperial_boundary_reason(reason: str) -> str:
+    match = re.search(r"([0-9.]+) (K|hPa|m/s)$", reason)
+    if match is None:
+        if "Weather-model valid time changed" in reason:
+            start, end = reason.rsplit(" from ", 1)[-1].split(" to ", 1)
+            return f"NOAA valid time changed · {start[11:16]} → {end[11:16]} UTC"
+        if "Weather-model cycle changed" in reason:
+            return "NOAA model cycle changed"
+        return reason
+    value = float(match.group(1))
+    unit = match.group(2)
+    replacement = {
+        "K": f"{value * 1.8:.1f} °F",
+        "hPa": f"{value * 100 * PASCALS_TO_INHG:.3f} inHg",
+        "m/s": f"{value * 1.943844492:.1f} kt",
+    }[unit]
+    return f"{reason[: match.start(1)]}{replacement}"
+
+
+def _region_rows(analysis: RealMissionAnalysis) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    elapsed_m = 0.0
+    _, longitude_reference = interpolate_position(analysis.atmospheric_route, 0.5)
+    terrain_by_id = {item.segment_id: item for item in analysis.terrain_regions}
+    for segment, regime in zip(
+        analysis.atmospheric_route.segments,
+        analysis.weather_regimes,
+        strict=True,
+    ):
+        start_m = elapsed_m
+        elapsed_m += segment.distance_m
+        terrain = terrain_by_id[segment.segment_id]
+        rows.append(
+            {
+                "region": segment.segment_id,
+                "start_mi": start_m * METERS_TO_MILES,
+                "end_mi": elapsed_m * METERS_TO_MILES,
+                "length_mi": segment.distance_m * METERS_TO_MILES,
+                "path": [
+                    [display_longitude(longitude, longitude_reference), latitude]
+                    for latitude, longitude in segment.path
+                ],
+                "bearing_deg": segment.bearing_deg,
+                "boundary_reason": _imperial_boundary_reason(regime.boundary_reason),
+                "samples": regime.sample_count,
+                "pressure_hpa": regime.pressure_hpa,
+                "pressure_inhg": regime.pressure_hpa * 100 * PASCALS_TO_INHG,
+                "temperature_f": (regime.temperature_k - 273.15) * 9 / 5 + 32,
+                "wind_kt": regime.wind_speed_mps * 1.943844492,
+                "sample_start_utc": regime.sample_start_time.isoformat(),
+                "sample_end_utc": regime.sample_end_time.isoformat(),
+                "model_valid_start_utc": regime.model_valid_start.isoformat(),
+                "model_valid_end_utc": regime.model_valid_end.isoformat(),
+                "model_cycles_utc": ", ".join(value.isoformat() for value in regime.model_cycles),
+                "provider": ", ".join(regime.providers),
+                "terrain": terrain.status,
+                "terrain_reason": terrain.reason,
+                "surface_boom": "NOT CALCULATED",
+            }
+        )
+    return rows
+
+
+def _evidence_payload(
+    mission_id: str,
+    analysis: RealMissionAnalysis,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    terrain = []
+    for result in analysis.terrain_regions:
+        terrain.append(
+            {
+                "segment_id": result.segment_id,
+                "status": result.status,
+                "reason": result.reason,
+                "source": None
+                if result.profile is None
+                else result.profile.source.model_dump(mode="json"),
+            }
+        )
+    return {
+        "schema": "machlane-real-input-evidence-v1",
+        "created_at": datetime.now(UTC).isoformat(),
+        "mission_id": mission_id,
+        "route": analysis.observed_route.model_dump(mode="json"),
+        "atmosphere": {
+            "model": analysis.noaa_model,
+            "coverage": analysis.noaa_coverage,
+            "requests": [
+                {
+                    "model": plan.model,
+                    "cycle": plan.model_cycle.isoformat(),
+                    "forecast_hour": plan.forecast_hour,
+                    "valid_time": plan.valid_time.isoformat(),
+                    "member": plan.member,
+                    "temporal_match": plan.temporal_match,
+                }
+                for plan in analysis.noaa_requests
+            ],
+            "profiles": [
+                profile.source.model_dump(mode="json") for profile in analysis.segment_atmospheres
+            ],
+        },
+        "terrain": terrain,
+        "segmentation": {
+            "policy": analysis.policy_version,
+            "maximum_sampling_interval_miles": 15,
+            "temperature_threshold_f": 1,
+            "ambient_pressure_threshold_inhg": 0.02,
+            "wind_vector_threshold_kt": 3,
+            "regions": [
+                {key: value for key, value in row.items() if key not in {"path", "color"}}
+                for row in rows
+            ],
+        },
+        "planned_route": {"status": "NOT SUPPLIED"},
+        "compliant_operating_corridor": {
+            "status": "NOT CALCULATED",
+            "reason": "Reviewed near-field signature and validated propagation engine required",
+        },
+        "sonic_boom": {
+            "status": "NOT CALCULATED",
+            "ground_overpressure": None,
+            "primary_rays": "NOT CALCULATED",
+            "secondary_direct_rays": "NOT CALCULATED",
+            "secondary_indirect_rays": "NOT CALCULATED",
+        },
+    }
+
+
 st.set_page_config(
-    page_title="MachLane · Mission workspace",
+    page_title="MachLane · Real mission workspace",
     page_icon="✦",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -78,425 +263,233 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-:root { --ink:#e5eef8; --muted:#8ba0b7; --panel:#101a27; --line:#233247; --teal:#2dd4bf; }
-.stApp { background: radial-gradient(circle at 50% -20%, #18283b 0, #0a111b 42%, #070c13 100%); color:var(--ink); }
+:root { --ink:#e8f0f8; --muted:#9aafc4; --panel:#101a27; --line:#2a3a4e; --teal:#2dd4bf; --amber:#fbbf24; }
+.stApp { background:radial-gradient(circle at 50% -20%,#192b40 0,#0a111b 43%,#070c13 100%); color:var(--ink); }
 [data-testid="stHeader"] { background:transparent; }
-[data-testid="stToolbar"], [data-testid="stStatusWidget"] { display:none; }
+[data-testid="stToolbar"],[data-testid="stStatusWidget"] { display:none; }
 .block-container { max-width:1600px; padding:1rem 1.5rem 3rem; }
-h1,h2,h3 { letter-spacing:-.02em; }
-.brand-row { display:flex; align-items:center; justify-content:space-between; margin:.15rem 0 .75rem; }
-.brand { display:flex; align-items:center; gap:.75rem; font-size:1.05rem; font-weight:750; letter-spacing:.02em; }
-.brand-mark { width:2rem; height:2rem; display:grid; place-items:center; border:1px solid #3a536d; border-radius:.55rem; color:var(--teal); background:#101c2a; }
-.run-state { color:#c6d5e5; font:700 .72rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.08em; text-transform:uppercase; }
-.notice { border:1px solid #855b27; background:#291f13; color:#ffd898; padding:.55rem .8rem; border-radius:.6rem; font-size:.78rem; margin-bottom:.85rem; }
-.mode-banner { min-height:3.35rem; display:flex; align-items:center; gap:.65rem; border-radius:.65rem; padding:.65rem .85rem; margin:.1rem 0 .75rem; font-size:.78rem; }
-.mode-banner b { letter-spacing:.1em; font:800 .72rem/1 ui-monospace,SFMono-Regular,monospace; }
-.mode-banner.mock { color:#fff4b8; border:1px solid #d9a900; background:linear-gradient(90deg,#3b2e08,#211c0d); }
-.mode-banner.baseline { color:#d8e8f7; border:1px solid #405873; background:#101b29; }
-.section-kicker { color:#6f879e; font:700 .68rem/1.2 ui-monospace,SFMono-Regular,monospace; letter-spacing:.12em; text-transform:uppercase; margin:.3rem 0 .65rem; }
-.panel-note { padding:.65rem .8rem; border:1px solid var(--line); background:#0c1520; border-radius:.6rem; color:#9fb2c7; font-size:.76rem; line-height:1.45; }
-.mission-strip { display:flex; gap:.9rem; flex-wrap:wrap; padding:.58rem .75rem; margin:.35rem 0 .65rem; border:1px solid var(--line); background:#0c1520; border-radius:.55rem; color:#8ba0b7; font-size:.72rem; }
-.mission-strip b { color:#dbe8f4; font-weight:650; }
-.status-card { border:1px solid var(--line); background:linear-gradient(145deg,#111d2b,#0c1520); border-radius:.7rem; padding:.8rem .9rem; margin:.35rem 0 .65rem; }
-.status-card .label { color:#b8c9da; font-size:.68rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; }
-.status-card .value { color:#e7f8f5; font-size:1.15rem; font-weight:750; margin:.15rem 0; }
-.status-card .meta { color:#b3c4d5; font-size:.74rem; }
-.calc-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:.55rem; margin:.4rem 0 .8rem; }
-.calc-step { border:1px solid var(--line); background:#0d1722; border-radius:.65rem; padding:.75rem; min-height:7rem; }
-.calc-step .number { color:var(--teal); font:700 .68rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.1em; }
-.calc-step b { display:block; color:#e5eef8; margin:.45rem 0 .25rem; font-size:.85rem; }
-.calc-step span { color:#8ba0b7; font-size:.73rem; line-height:1.4; }
-.eligible { display:inline-block; padding:.24rem .46rem; color:#8ff5e8; background:#123c3a; border:1px solid #1c716a; border-radius:99px; font:700 .66rem/1 ui-monospace,SFMono-Regular,monospace; }
-.pending { display:inline-block; padding:.24rem .46rem; color:#ffd38a; background:#3a2b16; border:1px solid #795a28; border-radius:99px; font:700 .66rem/1 ui-monospace,SFMono-Regular,monospace; }
-[data-testid="stMetric"] { background:linear-gradient(145deg,#152437,#0e1825); border:1px solid #405672; padding:.72rem .82rem; border-radius:.65rem; box-shadow:0 8px 24px rgba(0,0,0,.16); }
-[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * { color:#d8e5f2 !important; font-weight:700 !important; }
-[data-testid="stMetricValue"], [data-testid="stMetricValue"] * { color:#ffffff !important; font-size:1.42rem; font-weight:800 !important; text-shadow:0 1px 12px rgba(255,255,255,.08); }
-[data-testid="stMetricDelta"], [data-testid="stMetricDelta"] * { color:#c2d2e3 !important; opacity:1 !important; }
-[data-testid="stToggle"] label, [data-testid="stToggle"] p { color:#f4f8fc !important; font-weight:750 !important; }
-[data-testid="stVerticalBlockBorderWrapper"] { border-color:var(--line); background:#0c1520; }
-.stTabs [data-baseweb="tab-list"] { gap:.4rem; border-bottom:1px solid var(--line); }
-.stTabs [data-baseweb="tab"] { color:#8da2b7; height:2.7rem; }
-.stTabs [aria-selected="true"] { color:#eaf5ff; }
+.brand-row { display:flex; justify-content:space-between; align-items:center; margin:.1rem 0 .75rem; }
+.brand { display:flex; align-items:center; gap:.7rem; font-weight:800; letter-spacing:.01em; }
+.brand-mark { width:2rem; height:2rem; display:grid; place-items:center; border:1px solid #3c556f; border-radius:.55rem; color:var(--teal); background:#101c2a; }
+.run-state { color:#a9bed2; font:700 .7rem/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.1em; }
+.notice { border:1px solid #815d2e; background:#2a2014; color:#ffdda4; padding:.55rem .8rem; border-radius:.6rem; font-size:.78rem; margin-bottom:.8rem; }
+.source-banner { border:1px solid #25655f; background:linear-gradient(90deg,#123936,#0e1d29); color:#d5fff8; padding:.65rem .8rem; border-radius:.6rem; font-size:.78rem; margin:.5rem 0 .75rem; }
+.section-kicker { color:#7f98b0; font:700 .68rem/1.2 ui-monospace,SFMono-Regular,monospace; letter-spacing:.12em; text-transform:uppercase; margin:.3rem 0 .65rem; }
+.status-card { border:1px solid var(--line); background:linear-gradient(145deg,#142235,#0d1722); border-radius:.7rem; padding:.8rem .9rem; margin:.35rem 0 .65rem; }
+.status-card .label { color:#a9bdd0; font-size:.66rem; font-weight:750; letter-spacing:.1em; text-transform:uppercase; }
+.status-card .value { color:#f4f8fc; font-size:1.05rem; font-weight:800; margin:.18rem 0; }
+.status-card .meta { color:#a8bbce; font-size:.73rem; line-height:1.42; }
+.layer-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:.6rem; margin:.6rem 0 .8rem; }
+.layer { border:1px solid var(--line); background:#0c1520; border-radius:.65rem; padding:.75rem; }
+.layer b { display:block; color:#e9f1f8; font-size:.8rem; margin-bottom:.25rem; }
+.layer span { color:#94a9bd; font-size:.72rem; line-height:1.4; }
+.pending { display:inline-block; padding:.24rem .46rem; color:#ffd38a; background:#3a2b16; border:1px solid #795a28; border-radius:99px; font:700 .65rem/1 ui-monospace,SFMono-Regular,monospace; }
+[data-testid="stMetric"] { background:linear-gradient(145deg,#152437,#0e1825); border:1px solid #405672; padding:.72rem .82rem; border-radius:.65rem; }
+[data-testid="stMetricLabel"],[data-testid="stMetricLabel"] * { color:#d8e5f2 !important; font-weight:700 !important; }
+[data-testid="stMetricValue"],[data-testid="stMetricValue"] * { color:#fff !important; font-size:1.28rem; font-weight:800 !important; }
+[data-testid="stMetricDelta"],[data-testid="stMetricDelta"] * { color:#c2d2e3 !important; opacity:1 !important; }
+.stTabs [data-baseweb="tab-list"] { gap:.35rem; border-bottom:1px solid var(--line); }
+.stTabs [data-baseweb="tab"] { color:#91a6ba; }
+.stTabs [aria-selected="true"] { color:#eef7ff; }
 .stButton button { border:1px solid #2f6e69; background:#123a38; color:#d8fffa; }
-@media (max-width:900px) { .calc-grid { grid-template-columns:repeat(2,1fr); } .block-container { padding:.8rem; } }
+@media (max-width:900px) { .layer-grid { grid-template-columns:1fr; } .block-container { padding:.8rem; } }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-
-SCENARIO_CACHE_SCHEMA = "weather-regimes-v4-noaa-imperial"
-
-WEATHER_PRESETS = {
-    "Tight": (
-        15 * 1609.344,
-        WeatherSegmentationSettings(
-            temperature_change_k=0.56,
-            pressure_change_hpa=0.68,
-            wind_vector_change_mps=1.54,
-        ),
-        "15 mi samples · 1 °F · 0.02 inHg · 3 kt",
-    ),
-    "Balanced": (
-        25 * 1609.344,
-        WeatherSegmentationSettings(
-            temperature_change_k=1.1,
-            pressure_change_hpa=1.02,
-            wind_vector_change_mps=2.57,
-        ),
-        "25 mi samples · 2 °F · 0.03 inHg · 5 kt",
-    ),
-    "Broad": (
-        40 * 1609.344,
-        WeatherSegmentationSettings(
-            temperature_change_k=2.2,
-            pressure_change_hpa=2.03,
-            wind_vector_change_mps=5.14,
-        ),
-        "40 mi samples · 4 °F · 0.06 inHg · 10 kt",
-    ),
-}
-
-PHASE_ANCHORS = (
-    ("Takeoff", 0),
-    ("Climb", 7),
-    ("Accelerate", 14),
-    ("Cruise", 50),
-    ("Descent", 91),
-    ("Landing", 100),
-)
-
-
-def _set_aircraft_position(percent: int) -> None:
-    st.session_state["aircraft_progress_pct"] = percent
-
-
-def _imperial_boundary_reason(reason: str) -> str:
-    match = re.search(r"([0-9.]+) (K|hPa|m/s)$", reason)
-    if match is None:
-        return reason
-    value = float(match.group(1))
-    unit = match.group(2)
-    if unit == "K":
-        replacement = f"{value * 1.8:.1f} °F"
-    elif unit == "hPa":
-        replacement = f"{value * 100 * PASCALS_TO_INHG:.3f} inHg"
-    else:
-        replacement = f"{value * 1.943844492:.1f} kt"
-    return f"{reason[: match.start(1)]}{replacement}"
-
-
-@st.cache_resource(show_spinner=False)
-def scenario(
-    mission_id: str,
-    cache_schema: str,
-    route_json: str,
-    atmosphere_mode: str,
-    weather_preset: str,
-):
-    """Run one normalized observed route with an explicit atmosphere source."""
-
-    del cache_schema
-    route_override = Route.model_validate_json(route_json)
-    plan = plan_noaa_atmosphere(route_override, get_mission(mission_id).domain)
-    spacing_m, settings, _ = WEATHER_PRESETS[weather_preset]
-    provider = (
-        build_noaa_provider(
-            plan,
-            cache_dir=PROJECT_ROOT / "data/cache/herbie",
-            network_enabled=True,
-        )
-        if atmosphere_mode == "NOAA archived"
-        else SyntheticAtmosphereProvider()
-    )
-    return build_demo_scenario(
-        mission_id,
-        route_override=route_override,
-        atmosphere_provider=provider,
-        valid_time=plan.valid_time,
-        weather_sample_spacing_m=spacing_m,
-        weather_settings=settings,
-    )
-
-
 st.markdown(
     """
-<div class="brand-row"><div class="brand"><span class="brand-mark">M</span>MachLane</div>
-<div class="run-state">Mission feed simulator</div></div>
-<div class="notice"><b>Research prototype — not FAA approved.</b> No surface-overpressure or sonic-boom compliance result is calculated.</div>
+<div class="brand-row"><div class="brand"><span class="brand-mark">M</span>MachLane</div><div class="run-state">REAL MISSION INPUTS</div></div>
+<div class="notice"><b>Research prototype — not FAA approved.</b> Real route, atmosphere, and available terrain are loaded below. Surface overpressure and sonic-boom compliance are not calculated.</div>
 """,
     unsafe_allow_html=True,
 )
 
 missions = list_missions()
-mission_id = st.selectbox(
-    "Future high-speed mission",
-    options=[mission.mission_id for mission in missions],
-    format_func=lambda value: get_mission(value).label,
-    help="Airport pairs searched in OpenSky. The planner does not run unless an observed track is loaded.",
+control_mission, control_timeline, control_aircraft, control_action = st.columns(
+    [1.45, 1.25, 1.35, 1], vertical_alignment="bottom"
 )
+with control_mission:
+    mission_id = st.selectbox(
+        "Mission",
+        [mission.mission_id for mission in missions],
+        format_func=lambda value: get_mission(value).label,
+    )
 mission = get_mission(mission_id)
-
-with st.container(border=True):
-    source_control, source_date, source_action = st.columns(
-        [2.1, 1.2, 1.25], vertical_alignment="bottom"
+yesterday = datetime.now(UTC).date() - timedelta(days=1)
+with control_timeline:
+    timeline_mode = st.selectbox(
+        "Timeline",
+        ["Historical OpenSky replay", "Proposed departure"],
     )
-    with source_control:
-        st.markdown("**Observed route · OpenSky**")
-        st.caption(
-            f"Loads the most recent direct observed track in a {OPENSKY_LOOKBACK_DAYS}-day window. "
-            "No invented route fallback."
-        )
-    yesterday = datetime.now(UTC).date() - timedelta(days=1)
-    with source_date:
-        observed_date = st.date_input(
-            "Search ending (UTC)",
-            value=yesterday,
-            min_value=yesterday - timedelta(days=29),
-            max_value=yesterday,
-            key="opensky_observed_date",
-        )
-    credentials_configured = bool(
-        os.getenv("OPENSKY_CLIENT_ID") and os.getenv("OPENSKY_CLIENT_SECRET")
-    )
-    with source_action:
-        fetch_opensky = st.button(
-            "Refresh observed route",
-            disabled=not credentials_configured,
-            width="stretch",
-        )
-
-    opensky_key = f"opensky-route:{mission_id}:{observed_date.isoformat()}"
-    opensky_attempt_key = f"opensky-attempt:{mission_id}:{observed_date.isoformat()}"
-    cached_route = OPENSKY_CACHE.load(
-        mission_id,
-        observed_date,
-        origin_icao=mission.origin.icao,
-        destination_icao=mission.destination.icao,
-    )
-    if opensky_key not in st.session_state and cached_route is not None:
-        st.session_state[opensky_key] = cached_route.model_dump_json()
-    automatic_fetch = (
-        credentials_configured
-        and opensky_key not in st.session_state
-        and opensky_attempt_key not in st.session_state
-    )
-    if fetch_opensky or automatic_fetch:
-        st.session_state[opensky_attempt_key] = True
-        search_end = datetime.combine(observed_date, datetime.max.time(), tzinfo=UTC)
-        try:
-            with st.spinner(
-                f"Searching the latest {OPENSKY_LOOKBACK_DAYS} days for an OpenSky track…"
-            ):
-                fetched_route = OpenSkyTrackProvider(
-                    network_enabled=True
-                ).recent_route_for_airports(
-                    mission.origin,
-                    mission.destination,
-                    on_or_before=search_end,
-                    lookback_days=OPENSKY_LOOKBACK_DAYS,
-                )
-            st.session_state[opensky_key] = fetched_route.model_dump_json()
-            OPENSKY_CACHE.save(mission_id, observed_date, fetched_route)
-        except (RuntimeError, ValueError, OSError) as exc:
-            st.error(f"OpenSky import failed: {exc}")
-
-    observed_route_json = st.session_state.get(opensky_key)
-    if not credentials_configured:
-        st.warning(
-            "OpenSky credentials are missing. Set OPENSKY_CLIENT_ID and "
-            "OPENSKY_CLIENT_SECRET in Terminal, then restart Streamlit."
-        )
-    elif observed_route_json is None:
-        st.error(
-            "No observed OpenSky route is loaded. Choose another airport pair/date or refresh; "
-            "MachLane will not invent a replacement route."
-        )
-    st.caption(
-        "Experimental, downsampled observed path — not a filed route. "
-        "[OpenSky terms](https://opensky-network.org/about/terms-of-use)"
+with control_aircraft:
+    st.selectbox(
+        "Aircraft",
+        ["NASA STCA 55T · specification incomplete"],
+        help="The current workbook is not complete enough for an aircraft-specific propagation run.",
     )
 
-if not isinstance(observed_route_json, str):
-    st.info(
-        "OpenSky-only workspace paused. Configure credentials and load an observed route to run "
-        "mock atmospheric segmentation."
+if timeline_mode == "Historical OpenSky replay":
+    observed_date = st.date_input(
+        "OpenSky search ending (UTC)",
+        value=yesterday,
+        min_value=yesterday - timedelta(days=29),
+        max_value=yesterday,
     )
-    st.stop()
-
-observed_route = Route.model_validate_json(observed_route_json)
-if (
-    observed_route.source is None
-    or observed_route.source.provider != "opensky"
-    or observed_route.source.data_kind != "observed_track"
-):
-    st.error("Route provenance is not a normalized OpenSky observation; planning is stopped.")
-    st.stop()
-noaa_plan = plan_noaa_atmosphere(observed_route, mission.domain)
-
-with st.container(border=True):
-    atmosphere_choice, tolerance_choice, timing = st.columns(
-        [1.35, 1.1, 2.25], vertical_alignment="bottom"
-    )
-    with atmosphere_choice:
-        atmosphere_mode = st.radio(
-            "Atmosphere source",
-            ["Mock", "NOAA archived"],
-            horizontal=True,
-            help="NOAA downloads an archived HRRR or GEFS pressure-level snapshot valid during the observed flight.",
-        )
-    with tolerance_choice:
-        weather_preset = st.selectbox(
-            "Macro-area tolerance",
-            options=list(WEATHER_PRESETS),
-            index=1,
-            help="Tighter tolerances make more atmosphere regimes. These are research grouping controls, not boom-certification thresholds.",
-        )
-    with timing:
-        st.markdown(f"**{noaa_plan.model} · route-aligned atmosphere**")
-        st.caption(
-            f"Observed flight midpoint → {noaa_plan.valid_time:%Y-%m-%d %H:%M UTC} · "
-            f"cycle {noaa_plan.model_cycle:%H:%M UTC} · lead +{noaa_plan.forecast_hour} h · "
-            f"{WEATHER_PRESETS[weather_preset][2]}"
-        )
-
-mock_mode = atmosphere_mode == "Mock"
-if mock_mode:
-    st.markdown(
-        '<div class="mode-banner mock"><b>MOCK</b><span>Synthetic atmosphere and phase-aware aircraft fixture. No NOAA network request is made.</span></div>',
-        unsafe_allow_html=True,
-    )
+    proposed_departure: datetime | None = None
 else:
-    st.markdown(
-        f'<div class="mode-banner baseline"><b>NOAA</b><span>Archived {noaa_plan.model} model atmosphere valid during this OpenSky flight. Real model input; still not a sonic-boom result.</span></div>',
-        unsafe_allow_html=True,
+    proposed_day, proposed_clock = st.columns(2)
+    with proposed_day:
+        planned_date = st.date_input("Proposed departure date (UTC)", value=yesterday + timedelta(days=1))
+    with proposed_clock:
+        planned_time = st.time_input("Proposed departure time (UTC)", value=time(15, 0))
+    proposed_departure = datetime.combine(planned_date, planned_time, tzinfo=UTC)
+    observed_date = yesterday
+    st.error(
+        "Proposed-flight analysis is paused: the selected aircraft has no reviewed climb, acceleration, cruise, and descent schedule. MachLane will not invent one."
     )
+
+cached_route = OPENSKY_CACHE.load(
+    mission_id,
+    observed_date,
+    origin_icao=mission.origin.icao,
+    destination_icao=mission.destination.icao,
+)
+credentials_configured = bool(
+    _credential("OPENSKY_CLIENT_ID") and _credential("OPENSKY_CLIENT_SECRET")
+)
+can_run = timeline_mode == "Historical OpenSky replay" and (
+    cached_route is not None or credentials_configured
+)
+with control_action:
+    run_analysis = st.button("Run real analysis", disabled=not can_run, width="stretch")
+
+if timeline_mode == "Proposed departure":
+    st.info(
+        f"A real OpenSky baseline is required, but {proposed_departure:%Y-%m-%d %H:%M UTC} cannot be sampled until aircraft-specific route timing is reviewed."
+    )
+    st.stop()
+
+if cached_route is not None:
+    source = cached_route.source
+    retrieved = "unknown" if source is None else source.retrieved_at.strftime("%Y-%m-%d %H:%M UTC")
+    st.caption(f"Real OpenSky route is available in the private cache · retrieved {retrieved}. Refresh requires OpenSky credentials.")
+elif not credentials_configured:
+    st.error(
+        "OpenSky route unavailable: no matching real route is cached and OPENSKY_CLIENT_ID / OPENSKY_CLIENT_SECRET are not configured."
+    )
+    st.stop()
+
+route_state_key = f"real-route:{mission_id}:{observed_date.isoformat()}"
+if run_analysis:
+    try:
+        with st.spinner("Loading the real OpenSky track…"):
+            route = _load_or_fetch_route(mission_id, observed_date, force_refresh=False)
+        st.session_state[route_state_key] = route.model_dump_json()
+    except (RuntimeError, ValueError, OSError) as exc:
+        st.error(f"OpenSky route unavailable: {exc}")
+        st.stop()
+elif route_state_key not in st.session_state and cached_route is not None:
+    st.session_state[route_state_key] = cached_route.model_dump_json()
+
+route_json = st.session_state.get(route_state_key)
+if not isinstance(route_json, str):
+    st.info("Select the mission and date, then run the real-data analysis.")
+    st.stop()
+
+observed_route = Route.model_validate_json(route_json)
+source = observed_route.source
+if source is None or source.provider != "opensky" or source.data_kind != "observed_track":
+    st.error("Route provenance failed: the loaded geometry is not a normalized OpenSky observation.")
+    st.stop()
 
 try:
-    spinner_message = (
-        f"Fetching and sampling archived {noaa_plan.model} data for the observed route…"
-        if not mock_mode
-        else "Building mock atmospheric macro areas…"
-    )
-    with st.spinner(spinner_message):
-        demo = scenario(
-            mission_id,
-            SCENARIO_CACHE_SCHEMA,
-            observed_route_json,
-            atmosphere_mode,
-            weather_preset,
-        )
+    with st.spinner(
+        "Matching archived NOAA weather across every route position and UTC time, then loading available 3DEP terrain…"
+    ):
+        analysis = _analyze_real_route(mission_id, route_json, ANALYSIS_CACHE_SCHEMA)
 except (RuntimeError, ValueError, OSError) as exc:
-    st.error(f"Atmosphere load failed: {exc}")
+    st.error(f"NOAA atmosphere unavailable: {exc}")
     st.info(
-        "Select Mock to continue without a NOAA network request. MachLane does not silently substitute synthetic data."
+        "Analysis stopped. MachLane did not substitute synthetic weather, a standard atmosphere, or a different route."
     )
     st.stop()
 
-display_route = observed_route
-rows = segment_rows(demo.route, demo.result)
-regime_by_id = {regime.segment_id: regime for regime in demo.weather_regimes}
+rows = _region_rows(analysis)
+pressure_values = [float(row["pressure_hpa"]) for row in rows]
+pressure_min = min(pressure_values) - 0.5
+pressure_max = max(pressure_values) + 0.5
 for row in rows:
-    regime = regime_by_id[str(row["segment"])]
-    row.update(
-        {
-            "boundary_reason": _imperial_boundary_reason(regime.boundary_reason),
-            "weather_samples": regime.sample_count,
-            "regime_temperature_f": (regime.temperature_k - 273.15) * 9 / 5 + 32,
-            "regime_temperature_c": regime.temperature_k - 273.15,
-            "regime_pressure_inhg": regime.pressure_hpa * 100 * PASCALS_TO_INHG,
-            "regime_pressure_hpa": regime.pressure_hpa,
-            "pressure_label": f"{regime.pressure_hpa * 100 * PASCALS_TO_INHG:.3f}",
-            "regime_wind_kt": regime.wind_speed_mps * 1.943844492,
-            "ray_status": "NOT MODELED",
-        }
-    )
-pressure_values = [float(row["regime_pressure_hpa"]) for row in rows]
-pressure_min_hpa = min(pressure_values)
-pressure_max_hpa = max(pressure_values)
-pressure_scale_min_hpa = pressure_min_hpa - 0.5
-pressure_scale_max_hpa = pressure_max_hpa + 0.5
-for row in rows:
-    row["color"] = pressure_color(
-        float(row["regime_pressure_hpa"]),
-        pressure_scale_min_hpa,
-        pressure_scale_max_hpa,
-    )
-distance_miles = route_distance_m(display_route) * METERS_TO_MILES
-map_latitude, map_longitude = interpolate_position(display_route, 0.5)
-map_zoom = max(1.2, min(4.0, 4.9 - math.log2(max(distance_miles, 300) / 300)))
+    row["color"] = pressure_color(float(row["pressure_hpa"]), pressure_min, pressure_max)
 
-observed_source = observed_route.source
-callsign = observed_source.callsign if observed_source and observed_source.callsign else "unknown"
-observed_day = (
-    observed_source.observed_start.strftime("%Y-%m-%d")
-    if observed_source and observed_source.observed_start
-    else str(observed_date)
-)
-observed_window = "Time window unavailable"
-if observed_source and observed_source.observed_start and observed_source.observed_end:
-    observed_window = (
-        f"{observed_source.observed_start.strftime('%Y-%m-%d %H:%M')}–"
-        f"{observed_source.observed_end.strftime('%H:%M')} UTC"
-    )
-source_point_count = (
-    observed_source.point_count
-    if observed_source and observed_source.point_count is not None
-    else len(observed_route.waypoints)
-)
-st.caption(
-    f"Observed OpenSky trajectory · {callsign} · {observed_day} · "
-    "experimental/downsampled, not a filed route or future supersonic approval."
+route_distance_miles = route_distance_m(observed_route) * METERS_TO_MILES
+map_latitude, map_longitude = interpolate_position(observed_route, 0.5)
+map_zoom = max(1.2, min(4.2, 4.9 - math.log2(max(route_distance_miles, 300) / 300)))
+callsign = source.callsign or "unknown callsign"
+observed_start = source.observed_start
+observed_end = source.observed_end
+if observed_start is None or observed_end is None:
+    st.error("OpenSky route unavailable: the observation UTC window is missing.")
+    st.stop()
+observed_window = f"{observed_start:%Y-%m-%d %H:%M}–{observed_end:%H:%M} UTC"
+point_count = source.point_count or len(observed_route.observations)
+terrain_loaded = sum(result.status == "LOADED" for result in analysis.terrain_regions)
+terrain_unavailable = sum(result.status == "UNAVAILABLE" for result in analysis.terrain_regions)
+
+st.markdown(
+    f'<div class="source-banner"><b>Real inputs loaded.</b> OpenSky {callsign} · NOAA {analysis.noaa_model} matched throughout {observed_start:%H:%M}–{observed_end:%H:%M} UTC · automatic atmospheric regions · available USGS 3DEP terrain previews.</div>',
+    unsafe_allow_html=True,
 )
 
-summary_columns = st.columns(3)
-summary_columns[0].metric(
-    "Route",
-    "OpenSky observed",
-    f"{distance_miles:,.0f} mi · {len(display_route.waypoints)} observed points",
-    delta_color="off",
-)
-summary_columns[1].metric(
+summary = st.columns(5)
+summary[0].metric("Route", "OpenSky observed", f"{callsign} · {point_count:,} points", delta_color="off")
+summary[1].metric(
     "Atmosphere",
-    "MOCK fixture" if mock_mode else noaa_plan.model,
-    f"{len(demo.route.segments)} macro areas · {noaa_plan.valid_time:%H:%M UTC}",
+    f"NOAA {analysis.noaa_model} archive",
+    f"Matched {observed_start:%H:%M}–{observed_end:%H:%M} UTC",
     delta_color="off",
 )
-summary_columns[2].metric(
-    "Sonic boom",
-    "Not calculated",
-    "No footprint or ground overpressure",
+summary[2].metric(
+    "Terrain",
+    "USGS 3DEP",
+    f"{terrain_loaded} sparse previews · {terrain_unavailable} unavailable",
+    delta_color="off",
+)
+summary[3].metric(
+    "Atmospheric regions",
+    f"{len(rows)} automatic regions",
+    "Policy v1 · high resolution",
+    delta_color="off",
+)
+summary[4].metric(
+    "Surface boom",
+    "NOT CALCULATED",
+    "Near-field + validated propagation required",
     delta_color="off",
 )
 
-# The position slider lives inside the fragment below. Its value is persisted in session state so
-# the position-dependent detail tabs further down still resolve the correct segment on a full
-# rerun, while dragging the slider only reruns the fragment.
-st.session_state.setdefault("aircraft_progress_pct", 24)
-progress = st.session_state["aircraft_progress_pct"] / 100
-active_index = active_segment_index(demo.route, progress)
-active = rows[active_index]
-active_limit = demo.result.segment_limits[active_index]
-active_altitude_m = active_limit.selected_altitude_m or 0.0
-active_atmosphere = demo.segment_atmospheres[active_index]
-active_aircraft = aircraft_view(display_route, progress, map_longitude)
-weather_at_altitude = atmosphere_metrics(
-    active_atmosphere, active_altitude_m, active_aircraft["bearing_deg"]
+st.markdown(
+    """
+<div class="layer-grid">
+  <div class="layer"><b>1 · Historical route</b><span>Real OpenSky observed trajectory, timestamps, altitude observations, checksum, and limitations.</span></div>
+  <div class="layer"><b>2 · Planned route</b><span>Not supplied. A future plan must retain its own departure time and reviewed aircraft phase schedule.</span></div>
+  <div class="layer"><b>3 · Compliant operating corridor</b><span><span class="pending">NOT CALCULATED</span><br/>Atmospheric regions are not a compliant corridor.</span></div>
+</div>
+""",
+    unsafe_allow_html=True,
 )
 
-# Route geometry and labels never move while the slider does, so build them once. Every weather
-# path below comes from the grouped segment's retained OpenSky polyline, never its endpoint chord.
-atmosphere_map_layers = [
+atmosphere_layers = [
     pdk.Layer(
         "PathLayer",
         rows,
-        id="weather-regime-centerlines",
+        id="automatic-atmospheric-regions",
         get_path="path",
         get_color="color",
         get_width=5,
         width_units="pixels",
         width_min_pixels=4,
-        width_max_pixels=6,
         pickable=True,
     ),
     pdk.Layer(
@@ -504,676 +497,406 @@ atmosphere_map_layers = [
         [
             {
                 "position": row["path"][0],
-                "segment": row["segment"],
+                "region": row["region"],
                 "boundary_reason": row["boundary_reason"],
-                "pressure_label": row["pressure_label"],
+                "pressure_inhg": f'{row["pressure_inhg"]:.3f}',
             }
             for row in rows[1:]
         ],
-        id="weather-regime-boundaries",
+        id="automatic-region-boundaries",
         get_position="position",
         get_radius=4,
         radius_units="pixels",
-        radius_min_pixels=4,
-        radius_max_pixels=4,
-        get_fill_color=[240, 248, 255, 255],
+        get_fill_color=[244, 248, 252, 255],
         get_line_color=[7, 12, 19, 255],
         line_width_min_pixels=1,
         stroked=True,
         pickable=True,
     ),
 ]
-observed_track_layers = [
-    pdk.Layer(
-        "PathLayer",
-        [
-            {
-                "path": [
-                    [display_longitude(longitude, map_longitude), latitude]
-                    for latitude, longitude in observed_route.waypoints
-                ]
-            }
-        ],
-        id="opensky-observed-track",
-        get_path="path",
-        get_color=[255, 213, 0, 235],
-        width_min_pixels=4,
-    ),
-]
-label_map_layers = [
-    pdk.Layer(
-        "TextLayer",
-        [
-            {
-                "position": [
-                    display_longitude(mission.origin.longitude, map_longitude),
-                    mission.origin.latitude,
-                ],
-                "label": mission.origin.iata,
-            },
-            {
-                "position": [
-                    display_longitude(mission.destination.longitude, map_longitude),
-                    mission.destination.latitude,
-                ],
-                "label": mission.destination.iata,
-            },
-        ],
-        get_position="position",
-        get_text="label",
-        get_size=15,
-        get_pixel_offset=[0, -18],
-        get_color=[226, 236, 246, 230],
-    ),
-]
+observed_layer = pdk.Layer(
+    "PathLayer",
+    [
+        {
+            "path": [
+                [display_longitude(longitude, map_longitude), latitude]
+                for latitude, longitude in observed_route.waypoints
+            ]
+        }
+    ],
+    id="opensky-observed-route",
+    get_path="path",
+    get_color=[255, 213, 0, 235],
+    width_min_pixels=3,
+)
+label_layer = pdk.Layer(
+    "TextLayer",
+    [
+        {
+            "position": [display_longitude(mission.origin.longitude, map_longitude), mission.origin.latitude],
+            "label": mission.origin.iata,
+        },
+        {
+            "position": [display_longitude(mission.destination.longitude, map_longitude), mission.destination.latitude],
+            "label": mission.destination.iata,
+        },
+    ],
+    get_position="position",
+    get_text="label",
+    get_size=15,
+    get_pixel_offset=[0, -18],
+    get_color=[230, 239, 248, 235],
+)
 
 
 @fragment
 def render_workspace() -> None:
-    """Slider, map and live inspector, isolated so dragging the aircraft skips the heavy tabs.
-
-    Only this fragment reruns while the slider moves, so the aircraft repositions without rebuilding
-    the Plotly profiles, dataframes or evidence views. Route geometry is untouched: the marker is
-    placed by the WGS-84 ``aircraft_view`` transformation, never by screen-space interpolation.
-    """
-
     workspace, inspector = st.columns([3.15, 1], gap="medium")
     with workspace:
-        show_phase_panel = st.toggle(
-            "Flight phases",
-            value=True,
-            help="Jump the aircraft to a representative point in the synthetic phase schedule.",
-        )
-        if show_phase_panel:
-            phase_columns = st.columns(len(PHASE_ANCHORS))
-            for phase_column, (label, anchor) in zip(phase_columns, PHASE_ANCHORS, strict=True):
-                with phase_column:
-                    st.button(
-                        label,
-                        key=f"phase-anchor-{anchor}",
-                        on_click=_set_aircraft_position,
-                        args=(anchor,),
-                        width="stretch",
-                    )
         percent = st.slider(
-            "Aircraft position",
+            "Inspect observed flight position",
             0,
             100,
+            value=24,
             step=1,
             format="%d%%",
             key="aircraft_progress_pct",
         )
-        drag_progress = percent / 100
-        drag_index = active_segment_index(demo.route, drag_progress)
-        drag_row = rows[drag_index]
-        aircraft = aircraft_view(display_route, drag_progress, map_longitude)
-        flight_state = mock_flight_state(
-            drag_progress,
-            route_distance_miles=distance_miles,
-            cruise_mach=float(drag_row["mach"]),
-            cruise_altitude_ft=float(drag_row["altitude_ft"]),
+        progress = percent / 100
+        active_index = active_segment_index(analysis.atmospheric_route, progress)
+        active_row = rows[active_index]
+        profile = analysis.segment_atmospheres[active_index]
+        aircraft = aircraft_view(observed_route, progress, map_longitude)
+        state = observed_flight_state(observed_route, progress)
+        altitude_m = state["altitude_m"]
+        sampled_altitude_m = (
+            AUTOMATIC_WEATHER_SETTINGS.altitude_m
+            if altitude_m is None
+            else float(altitude_m)
         )
-        flight_phase = str(flight_state["phase"])
-        flight_mach = float(flight_state["mach"])
-        flight_altitude_ft = float(flight_state["altitude_ft"])
-        flight_is_supersonic = bool(flight_state["supersonic"])
-        drag_weather = atmosphere_metrics(
-            demo.segment_atmospheres[drag_index],
-            flight_altitude_ft / METERS_TO_FEET,
-            aircraft["bearing_deg"],
+        weather = atmosphere_metrics(profile, sampled_altitude_m, aircraft["bearing_deg"])
+        altitude_label = (
+            "Unavailable from OpenSky"
+            if state["altitude_ft"] is None
+            else f'{float(state["altitude_ft"]):,.0f} ft'
         )
-        if mock_mode:
-            drag_weather = mock_live_metrics(drag_weather, mission_id, drag_progress)
-        speed_of_sound_kt = (
-            math.sqrt(1.4 * 287.05287 * float(drag_weather["temperature_k"])) * 1.943844492
-        )
-        estimated_tas_kt = flight_mach * speed_of_sound_kt
-        flight_time = None
-        if observed_source and observed_source.observed_start and observed_source.observed_end:
-            flight_time = (
-                observed_source.observed_start
-                + (observed_source.observed_end - observed_source.observed_start) * drag_progress
-            )
+        timestamp = state["timestamp"]
 
-        st.markdown(
-            '<div class="section-kicker">Aircraft atmosphere · follows phase and position</div>',
-            unsafe_allow_html=True,
-        )
-        live_weather_columns = st.columns(4)
-        live_weather_columns[0].metric(
-            "Ambient pressure", f"{drag_weather['pressure_inhg']:.3f} inHg"
-        )
-        live_weather_columns[1].metric("Temperature", f"{drag_weather['temperature_f']:.1f} °F")
-        live_weather_columns[2].metric("Wind speed", f"{drag_weather['wind_speed_kt']:.0f} kt")
-        live_weather_columns[3].metric(
-            "Along-track wind", f"{drag_weather['along_wind_kt']:+.0f} kt"
-        )
+        st.markdown('<div class="section-kicker">Route-aligned ambient atmosphere</div>', unsafe_allow_html=True)
+        live = st.columns(4)
+        live[0].metric("Ambient pressure", f'{weather["pressure_inhg"]:.3f} inHg')
+        live[1].metric("Temperature", f'{weather["temperature_f"]:.1f} °F')
+        live[2].metric("Wind speed", f'{weather["wind_speed_kt"]:.0f} kt')
+        live[3].metric("Along-track wind", f'{weather["along_wind_kt"]:+.0f} kt')
 
-        title_left, title_right = st.columns([3, 1])
-        with title_left:
-            st.subheader("Atmospheric corridor")
-            st.caption(
-                "Blue = lower ambient pressure · red = higher ambient pressure · centered on OpenSky"
-            )
-        with title_right:
-            st.markdown(
-                '<div style="text-align:right"><span class="eligible">AMBIENT PRESSURE</span></div>',
-                unsafe_allow_html=True,
-            )
-        st.markdown(
-            f'<div class="mission-strip"><span>Route <b>{mission.origin.iata} → {mission.destination.iata} · {distance_miles:,.0f} mi</b></span><span>Geometry <b>OpenSky observed</b></span><span>Atmosphere <b>{"MOCK" if mock_mode else noaa_plan.model} · {noaa_plan.valid_time:%H:%M UTC}</b></span><span>Boom <b>not modeled</b></span></div>',
-            unsafe_allow_html=True,
+        st.subheader("Observed route and automatic atmospheric regions")
+        st.caption(
+            "Yellow = historical OpenSky track. Thin blue-to-red sections = ambient pressure at the 50,000 ft research reference altitude. They are not boom-safe or boom-unsafe areas."
         )
-        route_toggle, segment_toggle, toggle_note = st.columns([1, 1.15, 2.5])
-        with route_toggle:
-            show_observed_track = st.toggle("OpenSky track", value=True, key="show_observed_track")
-        with segment_toggle:
-            show_atmosphere_segments = st.toggle(
-                "Atmosphere segments", value=True, key="show_atmosphere_segments"
-            )
-        with toggle_note:
-            st.caption(
-                "Colored regimes share the exact OpenSky centerline; no filled corridor is drawn."
-            )
-
-        aircraft_layers = [
-            pdk.Layer(
-                "ScatterplotLayer",
-                [{"position": [aircraft["display_longitude"], aircraft["latitude"]]}],
-                id="aircraft-position-dot",
-                get_position="position",
-                get_radius=9,
-                radius_units="pixels",
-                radius_min_pixels=9,
-                radius_max_pixels=9,
-                get_fill_color=[255, 213, 0, 255],
-                get_line_color=[7, 12, 19, 255],
-                line_width_min_pixels=2,
-                stroked=True,
-            ),
-        ]
-        visible_map_layers: list[pdk.Layer] = []
-        if show_atmosphere_segments:
-            visible_map_layers.extend(atmosphere_map_layers)
-        if show_observed_track:
-            visible_map_layers.extend(observed_track_layers)
-        visible_map_layers.extend(label_map_layers)
+        aircraft_layer = pdk.Layer(
+            "ScatterplotLayer",
+            [{"position": [aircraft["display_longitude"], aircraft["latitude"]]}],
+            id="observed-aircraft-position",
+            get_position="position",
+            get_radius=8,
+            radius_units="pixels",
+            radius_min_pixels=8,
+            radius_max_pixels=8,
+            get_fill_color=[255, 213, 0, 255],
+            get_line_color=[7, 12, 19, 255],
+            line_width_min_pixels=2,
+            stroked=True,
+        )
         st.pydeck_chart(
             pdk.Deck(
-                layers=[*visible_map_layers, *aircraft_layers],
+                layers=[*atmosphere_layers, observed_layer, label_layer, aircraft_layer],
                 map_style=pdk.map_styles.CARTO_DARK,
                 initial_view_state=pdk.ViewState(
                     latitude=map_latitude,
                     longitude=map_longitude,
                     zoom=map_zoom,
                     pitch=8,
-                    bearing=0,
                 ),
                 tooltip={
-                    "html": "<b>{segment}</b><br/>Ambient pressure {pressure_label} inHg<br/>{boundary_reason}",
+                    "html": "<b>{region}</b><br/>Ambient pressure {pressure_inhg} inHg<br/>{boundary_reason}",
                     "style": {"backgroundColor": "#0b1420", "color": "#e5eef8"},
                 },
             ),
-            height=490,
+            height=500,
         )
-        legend_left, legend_right = st.columns([2, 1])
-        with legend_left:
-            st.caption(
-                f"Blue {pressure_scale_min_hpa * 100 * PASCALS_TO_INHG:.3f} inHg → red {pressure_scale_max_hpa * 100 * PASCALS_TO_INHG:.3f} inHg · exact OpenSky polyline, not boom overpressure"
-            )
-        with legend_right:
-            st.caption(f"{drag_progress:.0%} complete · {drag_row['segment']}")
+        st.caption(
+            f"Ambient-pressure scale: {pressure_min * 100 * PASCALS_TO_INHG:.3f}–{pressure_max * 100 * PASCALS_TO_INHG:.3f} inHg · exact retained route polyline · no surface-boom footprint"
+        )
 
     with inspector:
-        st.markdown('<div class="section-kicker">Live inspector</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-kicker">Observed flight inspector</div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="status-card"><div class="label">Flight phase fixture</div><div class="value">{flight_phase}</div><div class="meta">Mach {flight_mach:.2f} · estimated TAS {estimated_tas_kt:,.0f} kt · {flight_altitude_ft:,.0f} ft</div></div>',
+            f'<div class="status-card"><div class="label">OpenSky phase</div><div class="value">{state["phase"]}</div><div class="meta">{altitude_label} · Mach unavailable from this API</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="status-card"><div class="label">Ambient profile</div><div class="value">{drag_weather["pressure_inhg"]:.3f} inHg</div><div class="meta">{drag_weather["temperature_f"]:.1f} °F · wind {drag_weather["wind_speed_kt"]:.0f} kt · {"MOCK" if mock_mode else noaa_plan.model}</div></div>',
-            unsafe_allow_html=True,
-        )
-        if flight_time is not None:
-            st.markdown(
-                f'<div class="status-card"><div class="label">Observed-track time</div><div class="value">{flight_time:%H:%M UTC}</div><div class="meta">{flight_time:%A · %B %d, %Y}</div></div>',
-                unsafe_allow_html=True,
-            )
-        st.markdown(
-            f'<div class="status-card"><div class="label">Mock MCO corridor</div><div class="value">{"ACTIVE" if flight_is_supersonic else "INACTIVE"}</div><div class="meta">{"Synthetic limit Mach " + format(drag_row["mach"], ".2f") if flight_is_supersonic else "No Mach-cutoff decision below Mach 1"}</div></div>',
+            f'<div class="status-card"><div class="label">UTC position time</div><div class="value">{timestamp:%H:%M:%S UTC}</div><div class="meta">{timestamp:%A · %B %d, %Y}</div></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
-            '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT MODELED</span></div><div class="meta">No 0.11 psf determination</div></div>',
+            f'<div class="status-card"><div class="label">NOAA atmosphere</div><div class="value">{analysis.noaa_model} · {profile.valid_time:%H:%M UTC}</div><div class="meta">Region {active_row["region"]} · real model data</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="status-card"><div class="label">USGS terrain</div><div class="value">{active_row["terrain"].replace("_", " ")}</div><div class="meta">{active_row["terrain_reason"]}</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT CALCULATED</span></div><div class="meta">No ground waveform or overpressure metric</div></div>',
             unsafe_allow_html=True,
         )
         st.caption(
-            f"{drag_progress:.0%} · {aircraft['latitude']:.2f}°, {aircraft['longitude']:.2f}° · track {aircraft['bearing_deg']:.0f}°"
+            f'{percent}% · {aircraft["latitude"]:.2f}°, {aircraft["longitude"]:.2f}° · track {aircraft["bearing_deg"]:.0f}°'
         )
 
 
 render_workspace()
 
-plan_tab, atmosphere_tab, api_tab, model_tab, evidence_tab = st.tabs(
-    ["Segments", "Atmosphere", "Data & APIs", "How it works", "Evidence"]
+regions_tab, atmosphere_tab, terrain_tab, provenance_tab, how_tab, evidence_tab = st.tabs(
+    ["Atmospheric regions", "Atmosphere", "Terrain", "Data provenance", "How it works", "Evidence"]
 )
 
-with plan_tab:
-    table = pd.DataFrame(rows)
+with regions_tab:
+    frame = pd.DataFrame(rows)
     st.dataframe(
-        table,
+        frame,
         hide_index=True,
         width="stretch",
         column_order=[
-            "segment",
+            "region",
             "boundary_reason",
             "start_mi",
             "end_mi",
-            "regime_pressure_inhg",
-            "regime_temperature_f",
-            "regime_wind_kt",
-            "altitude_ft",
-            "mach",
-            "ray_status",
+            "length_mi",
+            "pressure_inhg",
+            "temperature_f",
+            "wind_kt",
+            "terrain",
+            "surface_boom",
         ],
         column_config={
-            "segment": "Segment",
+            "region": "Region",
             "boundary_reason": "Boundary trigger",
             "start_mi": st.column_config.NumberColumn("From mi", format="%.1f"),
             "end_mi": st.column_config.NumberColumn("To mi", format="%.1f"),
-            "regime_pressure_inhg": st.column_config.NumberColumn("Pressure", format="%.3f inHg"),
-            "regime_temperature_f": st.column_config.NumberColumn("Temperature", format="%.1f °F"),
-            "regime_wind_kt": st.column_config.NumberColumn("Wind", format="%.1f kt"),
-            "altitude_ft": st.column_config.NumberColumn("Altitude", format="%d ft"),
-            "mach": st.column_config.NumberColumn("Mach", format="%.2f"),
-            "ray_status": "Ray propagation",
+            "length_mi": st.column_config.NumberColumn("Length", format="%.1f mi"),
+            "pressure_inhg": st.column_config.NumberColumn("Ambient pressure", format="%.3f inHg"),
+            "temperature_f": st.column_config.NumberColumn("Temperature", format="%.1f °F"),
+            "wind_kt": st.column_config.NumberColumn("Wind", format="%.1f kt"),
+            "terrain": "3DEP",
+            "surface_boom": "Surface boom",
         },
     )
-    segment_export_columns = [
-        "segment",
-        "boundary_reason",
-        "start_mi",
-        "end_mi",
-        "weather_samples",
-        "regime_pressure_inhg",
-        "regime_temperature_f",
-        "regime_wind_kt",
-        "altitude_ft",
-        "mach",
-        "ray_status",
-    ]
+    export_columns = [key for key in frame.columns if key not in {"path", "color"}]
     st.download_button(
-        "Export segments · CSV",
-        table[segment_export_columns].to_csv(index=False),
-        file_name=f"machlane_{mission_id}_{observed_day}_segments_imperial.csv",
+        "Export atmospheric regions · CSV",
+        frame[export_columns].to_csv(index=False),
+        file_name=f"machlane_{mission_id}_{observed_start:%Y%m%d}_automatic_regions.csv",
         mime="text/csv",
     )
     st.caption(
-        f"{weather_preset} macro-area preset at 50,000 ft · {WEATHER_PRESETS[weather_preset][2]}. Boundaries occur when temperature, ambient pressure, or the wind vector leaves tolerance; lengths are variable and retain the exact OpenSky centerline."
+        "Automatic atmospheric regions · policy v1. Boundaries are caused by a recorded temperature, ambient-pressure, wind-vector, model-cycle, or model-valid-time change. The thresholds group atmospheric inputs; they are not compliance margins."
     )
 
 with atmosphere_tab:
     st.caption(
-        "The high-contrast flight-level values above the map follow the aircraft live. These charts "
-        "show the full vertical profile for the selected mission snapshot."
+        "Each region has its own real NOAA pressure-level column and valid time. Select a region to inspect; this does not change the source or segmentation policy."
     )
-    chart_left, chart_right = st.columns(2)
-    altitude_ft = [altitude * METERS_TO_FEET for altitude in active_atmosphere.altitude_m]
-    pressure_inhg = [pressure * PASCALS_TO_INHG for pressure in active_atmosphere.pressure_pa]
-    temperature_f = [
-        (temperature - 273.15) * 9 / 5 + 32 for temperature in active_atmosphere.temperature_k
-    ]
-    wind_speed_kt = [
+    selected_region = st.selectbox("Region", [row["region"] for row in rows], key="profile_region")
+    profile_index = next(index for index, row in enumerate(rows) if row["region"] == selected_region)
+    profile = analysis.segment_atmospheres[profile_index]
+    altitude_ft = [value * METERS_TO_FEET for value in profile.altitude_m]
+    pressure_inhg = [value * PASCALS_TO_INHG for value in profile.pressure_pa]
+    temperature_f = [(value - 273.15) * 9 / 5 + 32 for value in profile.temperature_k]
+    wind_kt = [
         math.hypot(u, v) * 1.943844492
-        for u, v in zip(
-            active_atmosphere.zonal_wind_mps,
-            active_atmosphere.meridional_wind_mps,
-            strict=True,
-        )
+        for u, v in zip(profile.zonal_wind_mps, profile.meridional_wind_mps, strict=True)
     ]
+    chart_left, chart_right = st.columns(2)
     with chart_left:
-        pressure_figure = go.Figure()
-        pressure_figure.add_trace(
+        figure = go.Figure(
             go.Scatter(
                 x=pressure_inhg,
                 y=altitude_ft,
-                name="Ambient pressure",
                 mode="lines+markers",
                 line={"color": "#60a5fa", "width": 3},
-                fill="tozerox",
-                fillcolor="rgba(96,165,250,.10)",
             )
         )
-        pressure_figure.add_trace(
-            go.Scatter(
-                x=[weather_at_altitude["pressure_inhg"]],
-                y=[active_altitude_m * METERS_TO_FEET],
-                name="Selected altitude",
-                mode="markers",
-                marker={"color": "#fbbf24", "size": 11},
-            )
-        )
-        pressure_figure.update_layout(
-            title=f"Pressure profile · {active['segment']} · {'MOCK' if mock_mode else noaa_plan.model}",
+        figure.update_layout(
+            title=f"Ambient pressure · {selected_region} · {profile.valid_time:%H:%M UTC}",
             xaxis_title="Pressure (inHg)",
             yaxis_title="Altitude (ft)",
             template="plotly_dark",
             height=380,
-            margin={"l": 20, "r": 15, "t": 50, "b": 20},
             paper_bgcolor="#0a111b",
             plot_bgcolor="#0d1722",
         )
-        st.plotly_chart(pressure_figure, width="stretch")
+        st.plotly_chart(figure, width="stretch")
     with chart_right:
-        wind_figure = go.Figure(
+        figure = go.Figure(
             go.Scatter(
-                x=wind_speed_kt,
+                x=wind_kt,
                 y=altitude_ft,
                 mode="lines+markers",
                 line={"color": "#2dd4bf", "width": 3},
-                marker={"size": 5},
-                fill="tozerox",
-                fillcolor="rgba(45,212,191,.10)",
             )
         )
-        wind_figure.update_layout(
-            title=f"Wind profile · {active['segment']} · synthetic",
+        figure.update_layout(
+            title=f"Wind speed · {selected_region} · {profile.valid_time:%H:%M UTC}",
             xaxis_title="Wind speed (kt)",
             yaxis_title="Altitude (ft)",
             template="plotly_dark",
             height=380,
-            margin={"l": 20, "r": 15, "t": 50, "b": 20},
             paper_bgcolor="#0a111b",
             plot_bgcolor="#0d1722",
         )
-        st.plotly_chart(wind_figure, width="stretch")
-    st.warning(
-        "Ambient pressure describes the surrounding atmosphere. Sonic-boom overpressure is a separate pressure disturbance and is not calculated here."
-    )
-    st.markdown("#### Profile values")
-    profile_table = pd.DataFrame(
+        st.plotly_chart(figure, width="stretch")
+    profile_frame = pd.DataFrame(
         {
             "Altitude (ft)": [round(value) for value in altitude_ft],
-            "Pressure (inHg)": [round(value, 3) for value in pressure_inhg],
+            "Ambient pressure (inHg)": [round(value, 3) for value in pressure_inhg],
             "Temperature (°F)": [round(value, 1) for value in temperature_f],
-            "Wind (kt)": [round(value, 1) for value in wind_speed_kt],
+            "Wind (kt)": [round(value, 1) for value in wind_kt],
         }
     )
-    st.dataframe(
-        profile_table,
-        hide_index=True,
-        width="stretch",
-    )
-    st.download_button(
-        "Export active profile · CSV",
-        profile_table.to_csv(index=False),
-        file_name=f"machlane_{mission_id}_{active['segment']}_profile_imperial.csv",
-        mime="text/csv",
+    st.dataframe(profile_frame, hide_index=True, width="stretch")
+    st.warning(
+        "Ambient pressure is an atmospheric input. It is not sonic-boom overpressure and cannot determine compliance by itself."
     )
 
-with api_tab:
-    st.markdown("#### Inputs, cache, and exports")
-    st.caption(
-        "OpenSky supplies the observed aircraft track. NOAA supplies the route-time atmosphere. "
-        "Neither source supplies a sonic-boom result. Downloads below contain the normalized data currently loaded in this run."
+with terrain_tab:
+    terrain_frame = pd.DataFrame(
+        [
+            {
+                "Region": result.segment_id,
+                "Status": result.status.replace("_", " "),
+                "Reason": result.reason,
+                "Resolution": None if result.profile is None else f"{result.profile.source.resolution_m:g} m",
+                "Retrieved": None
+                if result.profile is None
+                else result.profile.source.retrieved_at.isoformat(),
+                "Checksum": None if result.profile is None else result.profile.source.checksum,
+            }
+            for result in analysis.terrain_regions
+        ]
     )
+    st.dataframe(terrain_frame, hide_index=True, width="stretch")
+    st.caption(
+        "3DEP is requested automatically only inside MachLane's conservative U.S.-territory envelope. Oceans and unsupported international terrain stay explicitly unavailable."
+    )
+
+with provenance_tab:
+    st.markdown("#### Real input lineage")
     st.dataframe(
         pd.DataFrame(
             [
                 {
-                    "Input": "Route geometry",
-                    "API": "OpenSky Network REST API",
+                    "Input": "Historical route",
+                    "Source": "OpenSky Network REST API",
                     "Time": observed_window,
-                    "Use": "Observed centerline and timestamps",
+                    "State": "LOADED",
                 },
                 {
                     "Input": "Atmosphere",
-                    "API": "Local mock" if mock_mode else f"NOAA {noaa_plan.model} via Herbie",
-                    "Time": noaa_plan.valid_time.strftime("%Y-%m-%d %H:%M UTC"),
-                    "Use": "Pressure, temperature, humidity, and wind profiles",
+                    "Source": f"NOAA {analysis.noaa_model} via Herbie",
+                    "Time": f"{len(analysis.noaa_requests)} archived valid times",
+                    "State": "LOADED",
                 },
                 {
                     "Input": "Terrain",
-                    "API": "Flat fixture",
+                    "Source": "USGS 3DEP",
                     "Time": "Not time-varying",
-                    "Use": "Placeholder only; 3DEP not loaded in this run",
+                    "State": f"{terrain_loaded}/{len(rows)} REGIONS LOADED",
                 },
                 {
-                    "Input": "Boom propagation",
-                    "API": "Not connected",
+                    "Input": "Aircraft near-field signature",
+                    "Source": "Not supplied",
                     "Time": "—",
-                    "Use": "No footprint or ground overpressure",
+                    "State": "MISSING",
+                },
+                {
+                    "Input": "Physical propagation",
+                    "Source": "Not connected",
+                    "Time": "—",
+                    "State": "NOT CALCULATED",
                 },
             ]
         ),
         hide_index=True,
         width="stretch",
     )
-    route_export = pd.DataFrame(
-        {
-            "timestamp_utc": [
-                observation.timestamp.isoformat() for observation in observed_route.observations
-            ],
-            "latitude_deg": [observation.latitude for observation in observed_route.observations],
-            "longitude_deg": [observation.longitude for observation in observed_route.observations],
-            "altitude_ft": [
-                None
-                if observation.barometric_altitude_m is None
-                else round(observation.barometric_altitude_m * METERS_TO_FEET)
-                for observation in observed_route.observations
-            ],
-            "track_deg": [
-                observation.true_track_deg for observation in observed_route.observations
-            ],
-            "on_ground": [observation.on_ground for observation in observed_route.observations],
-        }
-    )
-    export_left, export_right = st.columns(2)
-    with export_left:
-        st.download_button(
-            "Export OpenSky observations · CSV",
-            route_export.to_csv(index=False),
-            file_name=f"machlane_{mission_id}_{observed_day}_opensky.csv",
-            mime="text/csv",
-            width="stretch",
-        )
-    with export_right:
-        st.download_button(
-            "Export normalized route · JSON",
-            observed_route.model_dump_json(indent=2),
-            file_name=f"machlane_{mission_id}_{observed_day}_route.json",
-            mime="application/json",
-            width="stretch",
-        )
-    st.caption(
-        f"NOAA cache · data/cache/herbie · {noaa_plan.label}. First real-model load may download a sizeable pressure-level subset; reruns reuse the cache."
-    )
-
-with model_tab:
-    st.markdown("#### What MachLane calculates today")
-    st.markdown(
-        """
-<div class="calc-grid">
-  <div class="calc-step"><span class="number">01</span><b>Load observed track</b><span>OpenSky departure and track responses are normalized with timestamps, coordinates, checksum, and limitations. No route fallback.</span></div>
-  <div class="calc-step"><span class="number">02</span><b>Sample atmosphere</b><span>Pressure, temperature, and wind are sampled along the retained OpenSky polyline.</span></div>
-  <div class="calc-step"><span class="number">03</span><b>Form weather regimes</b><span>Adjacent samples remain together until a characteristic crosses its threshold; every bend stays attached to the observed track.</span></div>
-  <div class="calc-step"><span class="number">04</span><b>Plan each segment</b><span>Mach and altitude candidates are evaluated separately inside every weather regime.</span></div>
-  <div class="calc-step"><span class="number">05</span><b>Propagate rays</b><span>Not implemented: effective sound speed, ray paths, footprint, and ground overpressure.</span></div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        f"Route input · OpenSky observed track · {callsign} · {observed_window} · "
-        f"{source_point_count:,} source points. OpenSky supplies route geometry, not weather."
-    )
-    equation_left, equation_right = st.columns([1.35, 1])
-    with equation_left:
-        st.markdown("##### Exact mock equation currently running")
-        st.code(
-            "synthetic_limit = 1.08\n"
-            "  + clamp(altitude_m - 10,000, 0, 8,000) / 200,000\n"
-            "  + along_track_wind_mps / 2,000\n"
-            "  - terrain_peak_m / 200,000\n\n"
-            "candidate accepted when Mach <= synthetic_limit",
-            language="text",
-        )
-        st.caption(
-            "This equation is intentionally arbitrary. It tests data flow and UI behavior; it is not sonic-boom physics."
-        )
-    with equation_right:
-        st.markdown("##### Active-segment variables")
-        st.caption("Reflect the segment at the last full reload, not mid-drag.")
+    with st.expander("NOAA request details"):
         st.dataframe(
             pd.DataFrame(
                 [
-                    {"Variable": "Route source", "Value": f"OpenSky · {callsign}"},
                     {
-                        "Variable": "Observed track",
-                        "Value": f"{source_point_count:,} points · {observed_window}",
-                    },
-                    {"Variable": "Candidate Mach", "Value": f"{active['mach']:.2f}"},
-                    {"Variable": "Altitude", "Value": f"{active['altitude_ft']:,} ft"},
-                    {"Variable": "Along-track wind", "Value": f"{active['along_wind_kt']:+.1f} kt"},
-                    {"Variable": "Synthetic limit", "Value": f"{active['synthetic_score']:.3f}"},
-                    {"Variable": "Surface overpressure", "Value": "NOT MODELED"},
+                        "Model": plan.model,
+                        "Cycle UTC": plan.model_cycle.isoformat(),
+                        "Lead": f"+{plan.forecast_hour} h",
+                        "Valid UTC": plan.valid_time.isoformat(),
+                        "Member": plan.member,
+                        "Time matching": plan.temporal_match,
+                        "Coverage": plan.coverage,
+                    }
+                    for plan in analysis.noaa_requests
                 ]
             ),
             hide_index=True,
             width="stretch",
         )
+        st.caption(
+            "Automatic policy v1 · maximum 15 mi sampling · 1 °F · 0.02 inHg · 3 kt. Exact thresholds are evidence metadata, not user controls."
+        )
+    with st.expander("Route provenance"):
+        st.json(source.model_dump(mode="json"))
+
+with how_tab:
+    st.markdown("#### What this run does")
+    st.markdown(
+        """
+1. Loads a real timestamped OpenSky track and stops if none is available.
+2. Retains every observation timestamp and the complete route polyline.
+3. Adds route samples only where needed to keep spacing at or below 15 miles.
+4. Matches archived HRRR or GEFS columns to each sample's changing UTC position and time.
+5. Starts a new automatic atmospheric region when a variable or NOAA model boundary crosses policy v1.
+6. Requests USGS 3DEP terrain where U.S. coverage may exist and records every unavailable region.
+7. Stops before boom propagation because no reviewed near-field signature and validated nonlinear engine are connected.
+"""
+    )
     st.info(
-        "A real boom calculation still needs a reviewed aircraft near-field pressure signature, atmospheric propagation, nonlinear distortion and absorption, terrain interaction, ground metrics, and validation against a trusted reference such as PCBoom."
+        "Adaptive refinement based on predicted ground overpressure will replace simple atmospheric thresholds only after a physical propagation engine exists."
     )
 
 with evidence_tab:
-    st.markdown("#### Observed route evidence")
-    route_checksum = (
-        observed_source.checksum if observed_source and observed_source.checksum else "Unavailable"
-    )
+    evidence = _evidence_payload(mission_id, analysis, rows)
+    st.markdown("#### Evidence-ready real inputs")
     st.dataframe(
         pd.DataFrame(
             [
-                {"Field": "Provider", "Value": "OpenSky Network REST API"},
-                {
-                    "Field": "Airport pair",
-                    "Value": f"{mission.origin.icao} → {mission.destination.icao}",
-                },
-                {"Field": "Callsign", "Value": callsign},
-                {
-                    "Field": "Flight ID",
-                    "Value": observed_source.flight_id or "Unavailable",
-                },
-                {"Field": "Observed UTC", "Value": observed_window},
-                {"Field": "Source observations", "Value": f"{source_point_count:,}"},
-                {
-                    "Field": "Normalized route points",
-                    "Value": f"{len(observed_route.waypoints):,}",
-                },
-                {"Field": "Payload checksum", "Value": route_checksum},
-                {
-                    "Field": "Geometry policy",
-                    "Value": "Full observed polyline retained; regimes drawn on centerline",
-                },
+                {"Outcome": "Historical route", "Status": "OPEN SKY OBSERVED · LOADED"},
+                {"Outcome": "Time-varying atmosphere", "Status": f"NOAA {analysis.noaa_model} · LOADED"},
+                {"Outcome": "Automatic atmospheric regions", "Status": f"{len(rows)} · POLICY V1"},
+                {"Outcome": "Terrain", "Status": f"{terrain_loaded}/{len(rows)} REGIONS LOADED"},
+                {"Outcome": "Planned route", "Status": "NOT SUPPLIED"},
+                {"Outcome": "Compliant operating corridor", "Status": "NOT CALCULATED"},
+                {"Outcome": "Ground waveform / overpressure", "Status": "NOT CALCULATED"},
             ]
         ),
         hide_index=True,
         width="stretch",
     )
-    if observed_source.source_url:
-        st.link_button("Open OpenSky source request", observed_source.source_url)
-    with st.expander("OpenSky limitations"):
-        for limitation in observed_source.limitations:
-            st.markdown(f"- {limitation}")
-
-    st.markdown("#### Data readiness")
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {
-                    "Source": "OpenSky",
-                    "State": "OBSERVED · LOADED",
-                    "Use": f"Route geometry · {callsign} · {source_point_count:,} points",
-                },
-                {
-                    "Source": "NOAA HRRR",
-                    "State": (
-                        "ARCHIVED MODEL · LOADED"
-                        if not mock_mode and noaa_plan.model == "HRRR"
-                        else mission.hrrr_coverage
-                    ),
-                    "Use": "Route-time regional atmosphere",
-                },
-                {
-                    "Source": "NOAA GEFS",
-                    "State": (
-                        "ARCHIVED CONTROL · LOADED"
-                        if not mock_mode and noaa_plan.model == "GEFS"
-                        else "GLOBAL · FETCH READY"
-                    ),
-                    "Use": "Route-time global atmosphere",
-                },
-                {
-                    "Source": "USGS 3DEP",
-                    "State": "U.S. LAND ONLY",
-                    "Use": "Terrain where covered",
-                },
-                {
-                    "Source": "ERA5",
-                    "State": "GLOBAL · CREDENTIAL GATED",
-                    "Use": "Historical back-testing",
-                },
-            ]
-        ),
-        hide_index=True,
+    st.download_button(
+        "Export real-input evidence · JSON",
+        json.dumps(evidence, indent=2, default=str),
+        file_name=f"machlane_{mission_id}_{observed_start:%Y%m%d}_real_input_evidence.json",
+        mime="application/json",
         width="stretch",
     )
     st.caption(
-        "Fetch-ready means the adapter can retrieve and normalize data. It does not mean the "
-        "source has been integrated into a validated planning or compliance workflow."
+        f"Policy identifier · {AUTOMATIC_WEATHER_POLICY_VERSION} · maximum sample interval {AUTOMATIC_WEATHER_SAMPLE_SPACING_M * METERS_TO_MILES:.0f} mi"
     )
-    evidence_left, evidence_right = st.columns([1.6, 1])
-    statuses = pd.DataFrame(
-        [
-            {"Outcome": key.replace("_", " ").title(), "Status": str(value)}
-            for key, value in compliance_matrix().items()
-        ]
-    )
-    with evidence_left:
-        st.dataframe(statuses, hide_index=True, width="stretch")
-    with evidence_right:
-        st.markdown("#### Traceability")
-        st.caption(f"Route · OpenSky · {callsign} · {observed_window}")
-        st.caption(f"Engine · {demo.result.engine_name} {demo.result.engine_version}")
-        st.caption(f"Atmosphere · {demo.atmosphere.source.provider}")
-        st.caption(f"Terrain · {demo.terrain.source.provider}")
-        st.caption(f"Scenario target · {demo.result.reliability_level:.0%} · unvalidated")
-        with st.expander("Raw provenance"):
-            st.json(
-                {
-                    "aircraft": demo.aircraft.name.original_value,
-                    "route": {
-                        "mission_id": mission.mission_id,
-                        "geometry": "OpenSky observed track resampled on WGS-84",
-                        "distance_miles": route_distance_m(demo.route) * METERS_TO_MILES,
-                        "airport_source": AIRPORT_SOURCE_URL,
-                        "airport_source_retrieved": AIRPORT_SOURCE_RETRIEVED,
-                        "operational_status": "OBSERVED_NOT_FILED_OR_CLEARED",
-                        "source": observed_source.model_dump(mode="json"),
-                    },
-                    "atmosphere": demo.atmosphere.source.model_dump(mode="json"),
-                    "terrain": demo.terrain.source.model_dump(mode="json"),
-                    "run_label": demo.result.label,
-                }
-            )
-        if st.button("Create evidence package", width="stretch"):
-            output = write_evidence_package(
-                aircraft=demo.aircraft,
-                route=demo.route,
-                result=demo.result,
-                atmosphere_source=demo.atmosphere.source,
-                terrain_source=demo.terrain.source,
-                configuration_path=PROJECT_ROOT / "configs/baseline.yml",
-                results_root=PROJECT_ROOT / "results",
-            )
-            st.success(f"Evidence package created: {output}")

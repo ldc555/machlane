@@ -42,6 +42,42 @@ def profiles_at_points(
     return tuple(provider.profile(latitude, longitude, valid_time) for latitude, longitude in points)
 
 
+def profiles_at_spacetime(
+    provider: AtmosphereProvider,
+    points: list[tuple[float, float]],
+    valid_times: list[datetime],
+) -> tuple[AtmosphericProfile, ...]:
+    """Sample atmospheric columns at route positions and their individual UTC times.
+
+    Providers that understand changing model cycles can implement ``profiles_at_times``. The
+    portable fallback groups equal valid times so ordinary providers retain their vectorized point
+    selection without pretending that one timestamp applies to an entire flight.
+    """
+
+    if len(points) != len(valid_times):
+        raise ValueError("atmospheric points and valid times must have equal lengths")
+    if not points:
+        return ()
+    timed_batch = getattr(provider, "profiles_at_times", None)
+    if callable(timed_batch):
+        return tuple(timed_batch(points, valid_times))
+
+    grouped: dict[datetime, list[int]] = {}
+    for index, valid_time in enumerate(valid_times):
+        if valid_time.tzinfo is None:
+            raise ValueError("atmospheric sample times must be timezone-aware")
+        grouped.setdefault(valid_time, []).append(index)
+    output: list[AtmosphericProfile | None] = [None] * len(points)
+    for valid_time, indices in grouped.items():
+        group_points = [points[index] for index in indices]
+        profiles = profiles_at_points(provider, group_points, valid_time)
+        for index, profile in zip(indices, profiles, strict=True):
+            output[index] = profile
+    if any(profile is None for profile in output):
+        raise RuntimeError("atmospheric provider returned an incomplete spacetime sample")
+    return tuple(profile for profile in output if profile is not None)
+
+
 def project_wind_onto_bearing(zonal_mps: float, meridional_mps: float, bearing_deg: float) -> float:
     """Project eastward/northward wind onto a clockwise-from-north route bearing."""
 

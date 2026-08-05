@@ -9,10 +9,13 @@ from datetime import datetime
 import numpy as np
 from pyproj import Geod
 
-from open_mco.atmosphere import AtmosphereProvider, profiles_at_points
+from open_mco.atmosphere import AtmosphereProvider, profiles_at_spacetime
 from open_mco.models import AtmosphericProfile, Route, RouteSegment
 
 _GEOD = Geod(ellps="WGS84")
+
+AUTOMATIC_WEATHER_POLICY_VERSION = "automatic-atmospheric-regions-v1"
+AUTOMATIC_WEATHER_SAMPLE_SPACING_M = 15 * 1609.344
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,7 @@ class WeatherSegmentationSettings:
     pressure_change_hpa: float = 1.0
     wind_vector_change_mps: float = 2.5
     minimum_samples_per_segment: int = 2
+    policy_version: str = "custom"
 
     def __post_init__(self) -> None:
         values = (
@@ -38,6 +42,16 @@ class WeatherSegmentationSettings:
             raise ValueError("minimum samples per weather segment must be positive")
 
 
+AUTOMATIC_WEATHER_SETTINGS = WeatherSegmentationSettings(
+    altitude_m=15_240.0,
+    temperature_change_k=5 / 9,
+    pressure_change_hpa=0.02 * 33.86389,
+    wind_vector_change_mps=3 / 1.943844492,
+    minimum_samples_per_segment=1,
+    policy_version=AUTOMATIC_WEATHER_POLICY_VERSION,
+)
+
+
 @dataclass(frozen=True)
 class WeatherRegimeSummary:
     """Atmospheric summary and boundary rationale for one output route segment."""
@@ -49,6 +63,13 @@ class WeatherRegimeSummary:
     pressure_hpa: float
     zonal_wind_mps: float
     meridional_wind_mps: float
+    sample_start_time: datetime
+    sample_end_time: datetime
+    model_valid_start: datetime
+    model_valid_end: datetime
+    model_cycles: tuple[datetime, ...]
+    providers: tuple[str, ...]
+    policy_version: str
 
     @property
     def wind_speed_mps(self) -> float:
@@ -62,6 +83,68 @@ class _WeatherSample:
     pressure_hpa: float
     zonal_wind_mps: float
     meridional_wind_mps: float
+    sample_time: datetime
+    profile: AtmosphericProfile
+
+
+def observation_time_at_progress(route: Route, progress: float) -> datetime:
+    """Interpolate UTC time through every retained OpenSky observation.
+
+    Distance, rather than observation index, determines interpolation so reception gaps do not
+    make the aircraft appear to spend equal time on unequal legs.
+    """
+
+    bounded = min(1.0, max(0.0, progress))
+    observations = route.observations
+    if len(observations) >= 2:
+        if any(
+            following.timestamp < current.timestamp
+            for current, following in zip(observations, observations[1:], strict=False)
+        ):
+            raise ValueError("OpenSky observations are not ordered by UTC timestamp")
+        leg_distances: list[float] = []
+        for current, following in zip(observations, observations[1:], strict=False):
+            _, _, distance = _GEOD.inv(
+                current.longitude,
+                current.latitude,
+                following.longitude,
+                following.latitude,
+            )
+            leg_distances.append(max(0.0, distance))
+        total = sum(leg_distances)
+        if total > 0:
+            target = total * bounded
+            elapsed = 0.0
+            for current, following, distance in zip(
+                observations,
+                observations[1:],
+                leg_distances,
+                strict=True,
+            ):
+                if elapsed + distance >= target:
+                    fraction = 0.0 if distance == 0 else (target - elapsed) / distance
+                    return current.timestamp + (following.timestamp - current.timestamp) * fraction
+                elapsed += distance
+            return observations[-1].timestamp
+    source = route.source
+    if source and source.observed_start and source.observed_end:
+        return source.observed_start + (source.observed_end - source.observed_start) * bounded
+    raise ValueError("observed route has no usable UTC observation timeline")
+
+
+def weather_sample_times(route: Route) -> list[datetime]:
+    """Return exact route-timeline times at every weather-cell midpoint."""
+
+    total = sum(segment.distance_m for segment in route.segments)
+    if total <= 0:
+        raise ValueError("weather route distance must be positive")
+    elapsed = 0.0
+    sample_times: list[datetime] = []
+    for segment in route.segments:
+        midpoint_progress = (elapsed + segment.distance_m / 2) / total
+        sample_times.append(observation_time_at_progress(route, midpoint_progress))
+        elapsed += segment.distance_m
+    return sample_times
 
 
 def coarsen_route_for_weather(route: Route, sample_spacing_m: float) -> Route:
@@ -118,6 +201,7 @@ def _sample_segment(
     segment: RouteSegment,
     profile: AtmosphericProfile,
     altitude_m: float,
+    sample_time: datetime,
 ) -> _WeatherSample:
     return _WeatherSample(
         segment=segment,
@@ -127,6 +211,8 @@ def _sample_segment(
         meridional_wind_mps=float(
             np.interp(altitude_m, profile.altitude_m, profile.meridional_wind_mps)
         ),
+        sample_time=sample_time,
+        profile=profile,
     )
 
 
@@ -138,7 +224,24 @@ def _boundary_reason(
     sample: _WeatherSample,
     regime: list[_WeatherSample],
     settings: WeatherSegmentationSettings,
-) -> str | None:
+) -> tuple[str | None, bool]:
+    reference = regime[-1].profile.source
+    current = sample.profile.source
+    if current.provider != reference.provider:
+        return (
+            f"Weather-model coverage changed from {reference.provider} to {current.provider}",
+            True,
+        )
+    if current.model_cycle != reference.model_cycle:
+        previous_cycle = "unknown" if reference.model_cycle is None else reference.model_cycle.isoformat()
+        next_cycle = "unknown" if current.model_cycle is None else current.model_cycle.isoformat()
+        return (f"Weather-model cycle changed from {previous_cycle} to {next_cycle}", True)
+    if current.valid_time != reference.valid_time:
+        return (
+            "Weather-model valid time changed from "
+            f"{reference.valid_time.isoformat()} to {current.valid_time.isoformat()}",
+            True,
+        )
     temperature_delta = abs(sample.temperature_k - _mean(regime, "temperature_k"))
     pressure_delta = abs(sample.pressure_hpa - _mean(regime, "pressure_hpa"))
     zonal_delta = sample.zonal_wind_mps - _mean(regime, "zonal_wind_mps")
@@ -159,15 +262,16 @@ def _boundary_reason(
         ),
     ]
     severity, reason = max(triggers, key=lambda item: item[0])
-    return reason if severity > 1 else None
+    return (reason if severity > 1 else None, False)
 
 
 def segment_route_by_weather(
     sampled_route: Route,
     provider: AtmosphereProvider,
-    valid_time: datetime,
+    valid_time: datetime | None = None,
     *,
     settings: WeatherSegmentationSettings | None = None,
+    sample_times: list[datetime] | None = None,
 ) -> tuple[Route, tuple[WeatherRegimeSummary, ...]]:
     """Merge fine geodesic samples while atmosphere characteristics remain uniform."""
 
@@ -181,22 +285,33 @@ def segment_route_by_weather(
             segment.distance_m / 2,
         )
         sample_points.append((latitude, longitude))
-    profiles = profiles_at_points(provider, sample_points, valid_time)
+    if sample_times is None:
+        if valid_time is None:
+            raise ValueError("weather segmentation requires a valid time or route sample times")
+        sample_times = [valid_time] * len(sample_points)
+    if len(sample_times) != len(sample_points):
+        raise ValueError("weather sample times must align with route sampling cells")
+    profiles = profiles_at_spacetime(provider, sample_points, sample_times)
     samples = [
         _sample_segment(
             segment,
             profile,
             active_settings.altitude_m,
+            sample_time,
         )
-        for segment, profile in zip(sampled_route.segments, profiles, strict=True)
+        for segment, profile, sample_time in zip(
+            sampled_route.segments, profiles, sample_times, strict=True
+        )
     ]
     grouped_samples: list[list[_WeatherSample]] = []
     boundary_reasons = ["Departure / initial weather regime"]
     regime = [samples[0]]
 
     for sample in samples[1:]:
-        reason = _boundary_reason(sample, regime, active_settings)
-        if reason is not None and len(regime) >= active_settings.minimum_samples_per_segment:
+        reason, forced = _boundary_reason(sample, regime, active_settings)
+        if reason is not None and (
+            forced or len(regime) >= active_settings.minimum_samples_per_segment
+        ):
             grouped_samples.append(regime)
             boundary_reasons.append(reason)
             regime = [sample]
@@ -207,6 +322,16 @@ def segment_route_by_weather(
         boundary_reasons.pop()
     else:
         grouped_samples.append(regime)
+    def retained_path(group: list[_WeatherSample]) -> tuple[tuple[float, float], ...]:
+        points: list[tuple[float, float]] = []
+        for sample in group:
+            path = sample.segment.path or (
+                (sample.segment.start_latitude, sample.segment.start_longitude),
+                (sample.segment.end_latitude, sample.segment.end_longitude),
+            )
+            points.extend(path if not points else path[1:])
+        return tuple(points)
+
     segments = tuple(
         RouteSegment(
             segment_id=f"S{index + 1:04d}",
@@ -216,12 +341,7 @@ def segment_route_by_weather(
             end_longitude=group[-1].segment.end_longitude,
             distance_m=sum(sample.segment.distance_m for sample in group),
             bearing_deg=group[0].segment.bearing_deg,
-            path=(
-                (group[0].segment.start_latitude, group[0].segment.start_longitude),
-                *tuple(
-                    (sample.segment.end_latitude, sample.segment.end_longitude) for sample in group
-                ),
-            ),
+            path=retained_path(group),
         )
         for index, group in enumerate(grouped_samples)
     )
@@ -241,6 +361,21 @@ def segment_route_by_weather(
             pressure_hpa=_mean(group, "pressure_hpa"),
             zonal_wind_mps=_mean(group, "zonal_wind_mps"),
             meridional_wind_mps=_mean(group, "meridional_wind_mps"),
+            sample_start_time=group[0].sample_time,
+            sample_end_time=group[-1].sample_time,
+            model_valid_start=min(sample.profile.source.valid_time for sample in group),
+            model_valid_end=max(sample.profile.source.valid_time for sample in group),
+            model_cycles=tuple(
+                sorted(
+                    {
+                        sample.profile.source.model_cycle
+                        for sample in group
+                        if sample.profile.source.model_cycle is not None
+                    }
+                )
+            ),
+            providers=tuple(sorted({sample.profile.source.provider for sample in group})),
+            policy_version=active_settings.policy_version,
         )
         for index, (segment, group) in enumerate(zip(route.segments, grouped_samples, strict=True))
     )

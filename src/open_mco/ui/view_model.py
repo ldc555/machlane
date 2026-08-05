@@ -7,16 +7,18 @@ import math
 from typing import Any
 
 import numpy as np
+from pyproj import Geod
 
 from open_mco.atmosphere import project_wind_onto_bearing
 from open_mco.models import AtmosphericProfile, PlannerResult, Route
-from open_mco.route import corridor_geojson, interpolate_position
+from open_mco.route import corridor_geojson, interpolate_position, observation_time_at_progress
 
 METERS_TO_FEET = 3.280839895
 METERS_TO_MILES = 1 / 1609.344
 METERS_TO_NAUTICAL_MILES = 1 / 1852
 METERS_PER_SECOND_TO_KNOTS = 1.943844492
 PASCALS_TO_INHG = 1 / 3386.389
+_GEOD = Geod(ellps="WGS84")
 
 
 def pressure_color(value_hpa: float, minimum_hpa: float, maximum_hpa: float) -> list[int]:
@@ -201,6 +203,75 @@ def aircraft_view(route: Route, progress: float, longitude_reference: float) -> 
         "longitude": longitude,
         "display_longitude": display_longitude(longitude, longitude_reference),
         "bearing_deg": bearing_deg,
+    }
+
+
+def observed_flight_state(route: Route, progress: float) -> dict[str, object]:
+    """Interpolate the real OpenSky altitude and derive a plainly labeled observed phase.
+
+    OpenSky's track response does not include Mach or a reviewed aircraft performance schedule, so
+    this transformation intentionally does not estimate either value.
+    """
+
+    observations = route.observations
+    if len(observations) < 2:
+        raise ValueError("observed flight state requires timestamped OpenSky observations")
+    bounded = min(1.0, max(0.0, progress))
+    legs: list[float] = []
+    for current, following in zip(observations, observations[1:], strict=False):
+        _, _, distance = _GEOD.inv(
+            current.longitude,
+            current.latitude,
+            following.longitude,
+            following.latitude,
+        )
+        legs.append(max(0.0, distance))
+    total = sum(legs)
+    target = total * bounded
+    elapsed = 0.0
+    current_index = len(observations) - 2
+    local = 1.0
+    for index, distance in enumerate(legs):
+        if elapsed + distance >= target:
+            current_index = index
+            local = 0.0 if distance == 0 else (target - elapsed) / distance
+            break
+        elapsed += distance
+    current = observations[current_index]
+    following = observations[current_index + 1]
+    altitude_m: float | None = None
+    if current.barometric_altitude_m is not None and following.barometric_altitude_m is not None:
+        altitude_m = current.barometric_altitude_m + (
+            following.barometric_altitude_m - current.barometric_altitude_m
+        ) * local
+    on_ground = current.on_ground and following.on_ground
+    available_altitudes = [
+        observation.barometric_altitude_m
+        for observation in observations
+        if observation.barometric_altitude_m is not None
+    ]
+    peak_altitude = max(available_altitudes) if available_altitudes else None
+    vertical_delta = None
+    if current.barometric_altitude_m is not None and following.barometric_altitude_m is not None:
+        vertical_delta = following.barometric_altitude_m - current.barometric_altitude_m
+    if on_ground or (altitude_m is not None and altitude_m < 150):
+        phase = "Ground / airport movement"
+    elif peak_altitude is not None and altitude_m is not None and altitude_m >= peak_altitude * 0.9:
+        phase = "Observed cruise band"
+    elif vertical_delta is not None and vertical_delta > 50:
+        phase = "Observed climb"
+    elif vertical_delta is not None and vertical_delta < -50:
+        phase = "Observed descent"
+    else:
+        phase = "Observed airborne"
+    return {
+        "timestamp": observation_time_at_progress(route, bounded),
+        "altitude_m": altitude_m,
+        "altitude_ft": None if altitude_m is None else altitude_m * METERS_TO_FEET,
+        "phase": phase,
+        "on_ground": on_ground,
+        "mach": None,
+        "speed_kt": None,
     }
 
 

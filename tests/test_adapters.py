@@ -333,6 +333,34 @@ def test_3dep_adapter_samples_a_route_leg(monkeypatch) -> None:
     assert profile.source.label == "REAL_USGS_DATA_UNVALIDATED_FOR_OPERATIONAL_USE"
 
 
+def test_3dep_route_point_preview_is_real_sparse_and_cacheable(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("MACHLANE_NETWORK_DISABLED", raising=False)
+    segment = route_from_waypoints([(39.0, -98.0), (39.0, -97.9)], spacing_m=100_000).segments[0]
+    provider = USGS3DEPProvider(
+        network_enabled=True,
+        sampling_mode="route_points",
+        cache_dir=tmp_path,
+    )
+    calls: list[str] = []
+
+    def fake_request(url, *, data=None, headers=None) -> bytes:
+        del data, headers
+        calls.append(url)
+        return json.dumps({"value": "12.5", "resolution": 1}).encode()
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    profile = provider.profile(segment)
+    cached = provider.profile(segment)
+
+    assert len(profile.distance_m) == 3
+    assert profile.elevation_m == (12.5, 12.5, 12.5)
+    assert profile.source.label == "REAL_USGS_DATA_SPARSE_PREVIEW_NOT_FOR_PROPAGATION"
+    assert profile.source.interpolation == "three EPQS route points; availability preview only"
+    assert cached == profile
+    assert len(calls) == 3
+
+
 def test_era5_adapter_retrieves_cached_pressure_profile(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("MACHLANE_NETWORK_DISABLED", raising=False)
 

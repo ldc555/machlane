@@ -7,13 +7,15 @@ from .providers import (
     HerbieHRRRProvider,
     SyntheticAtmosphereProvider,
     profiles_at_points,
+    profiles_at_spacetime,
     project_wind_onto_bearing,
 )
 from .route_weather import (
     NOAAAtmospherePlan,
+    TimeAlignedNOAAProvider,
     build_noaa_provider,
-    observed_route_valid_time,
-    plan_noaa_atmosphere,
+    build_time_aligned_noaa_provider,
+    noaa_request_for_time,
 )
 
 __all__ = [
@@ -23,9 +25,11 @@ __all__ = [
     "HerbieHRRRProvider",
     "SyntheticAtmosphereProvider",
     "profiles_at_points",
+    "profiles_at_spacetime",
     "NOAAAtmospherePlan",
+    "TimeAlignedNOAAProvider",
     "build_noaa_provider",
-    "observed_route_valid_time",
-    "plan_noaa_atmosphere",
+    "build_time_aligned_noaa_provider",
+    "noaa_request_for_time",
     "project_wind_onto_bearing",
 ]

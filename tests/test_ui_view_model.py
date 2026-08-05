@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from open_mco.atmosphere import SyntheticAtmosphereProvider
@@ -13,6 +15,7 @@ from open_mco.ui.view_model import (
     display_longitude,
     mock_flight_state,
     mock_live_metrics,
+    observed_flight_state,
     pressure_color,
     segment_rows,
 )
@@ -222,3 +225,64 @@ def test_mock_live_metrics_are_smooth_reproducible_and_route_specific() -> None:
     assert first != other_route
     assert abs(first["pressure_hpa"] - adjacent["pressure_hpa"]) < 1.0
     assert abs(first["temperature_c"] - adjacent["temperature_c"]) < 1.0
+
+
+def test_observed_flight_state_uses_opensky_time_and_never_invents_mach() -> None:
+    from datetime import UTC, datetime
+
+    from open_mco.models import RouteObservation, RouteSourceMetadata
+
+    observations = (
+        RouteObservation(
+            timestamp=datetime(2026, 8, 3, 10, tzinfo=UTC),
+            latitude=32.9,
+            longitude=-97.0,
+            barometric_altitude_m=0,
+            on_ground=True,
+        ),
+        RouteObservation(
+            timestamp=datetime(2026, 8, 3, 11, tzinfo=UTC),
+            latitude=35.0,
+            longitude=-90.0,
+            barometric_altitude_m=10_000,
+            on_ground=False,
+        ),
+        RouteObservation(
+            timestamp=datetime(2026, 8, 3, 12, tzinfo=UTC),
+            latitude=40.6,
+            longitude=-73.8,
+            barometric_altitude_m=0,
+            on_ground=True,
+        ),
+    )
+    route = route_from_waypoints(
+        [(item.latitude, item.longitude) for item in observations],
+        spacing_m=500_000,
+        observations=observations,
+        source=RouteSourceMetadata(
+            provider="opensky",
+            data_kind="observed_track",
+            retrieved_at=datetime(2026, 8, 4, tzinfo=UTC),
+            label="TEST",
+        ),
+    )
+
+    state = observed_flight_state(route, 0.3)
+
+    assert state["mach"] is None
+    assert state["speed_kt"] is None
+    assert state["altitude_ft"] is not None
+    assert datetime(2026, 8, 3, 10, tzinfo=UTC) < state["timestamp"] < datetime(
+        2026, 8, 3, 12, tzinfo=UTC
+    )
+
+
+def test_production_workspace_has_no_synthetic_or_tolerance_controls() -> None:
+    source = (Path(__file__).parents[1] / "src/open_mco/ui/app.py").read_text(encoding="utf-8")
+
+    assert "SyntheticAtmosphereProvider" not in source
+    assert "build_demo_scenario" not in source
+    assert '"Mock"' not in source
+    assert "Atmosphere source" not in source
+    assert "Macro-area tolerance" not in source
+    assert "WEATHER_PRESETS" not in source

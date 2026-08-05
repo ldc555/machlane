@@ -1,19 +1,19 @@
 weather:
   hrrr:
     access: herbie
-    network_enabled: false
+    production_workspace: automatic_for_reviewed_conus_routes
   gefs:
     access: herbie
-    network_enabled: false
+    production_workspace: automatic_for_oceanic_and_global_routes
   era5:
     access: copernicus_cds
-    network_enabled: false
+    production_workspace: historical_validation_only
 terrain:
   usgs_3dep:
-    access: py3dep
-    network_enabled: false
+    access: official_usgs_web_services
+    production_workspace: automatic_where_us_coverage_is_available
 routes:
   opensky:
     access: oauth2_rest
-    network_enabled: false
+    production_workspace: required
     data_kind: observed_track
