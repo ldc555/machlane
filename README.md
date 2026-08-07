@@ -1,186 +1,171 @@
 # MachLane
 
-MachLane is an open-source research workspace for assembling the real route, atmosphere, terrain,
-aircraft, propagation, and evidence inputs needed for future Mach-cutoff operational assurance.
+MachLane is an open-source research workspace that combines a real OpenSky flight track, real NOAA
+weather, available USGS terrain, and an uploaded aircraft workbook to build a route-aligned
+high-speed flight analysis.
 
-> **Research prototype — not FAA approved.** MachLane does not currently calculate a ground
-> waveform, surface overpressure, sonic-boom footprint, or compliant operating corridor.
+> **Research prototype — not FAA approved.** MachLane currently estimates route timing and groups
+> atmospheric conditions. It does **not** yet calculate a sonic-boom footprint, surface
+> overpressure, or compliant operating corridor.
 
-## What the production workspace does now
+## Quick start
 
-The Streamlit workspace is real-data-only:
+### 1. Install the prerequisites
 
-1. Load a real timestamped OpenSky observed track.
-2. Retain every OpenSky observation timestamp and the complete route polyline.
-3. Match archived NOAA atmosphere to the aircraft's changing position and UTC time.
-4. Use HRRR only when the complete route is inside MachLane's conservative reviewed CONUS
-   envelope; otherwise use the GEFS global grid.
-5. Request a sparse USGS 3DEP elevation/availability preview automatically where U.S. land
-   coverage may exist.
-6. Form versioned, automatic atmospheric regions while retaining exact route geometry.
-7. Export route, weather, terrain, region-boundary, timestamp, source, and checksum evidence.
-8. Stop before sonic-boom propagation when physical inputs are unavailable.
+You need:
 
-There is no production Mock toggle, atmosphere-source selector, or segmentation-tolerance
-selector. Synthetic providers and the mock propagation engine remain test fixtures only.
+- Git;
+- Python 3.11 or newer;
+- a free [OpenSky account](https://opensky-network.org/).
 
-## What each source supplies
+### 2. Clone and install MachLane
 
-| Source | MachLane uses it for | It does not prove |
-|---|---|---|
-| [OpenSky REST API](https://openskynetwork.github.io/opensky-api/rest.html) | Recent observed track geometry, UTC timestamps, barometric altitude, track angle, flight identity, and provenance | Filed route, future supersonic approval, weather, Mach, or boom compliance |
-| [NOAA HRRR](https://rapidrefresh.noaa.gov/hrrr/) via [Herbie](https://github.com/blaylockbk/Herbie) | Archived hourly pressure-level atmosphere for routes fully inside the reviewed v1 CONUS envelope | Global coverage or sonic-boom overpressure |
-| [NOAA GEFS](https://www.emc.ncep.noaa.gov/emc/pages/numerical_forecast_systems/gefs.php) via Herbie | Archived global pressure-level atmosphere; control member is currently used in the workspace | Validated uncertainty or compliance |
-| [ERA5](https://cds.climate.copernicus.eu/datasets/reanalysis-era5-pressure-levels) | Credential-gated historical replay, back-testing, and validation | Live prediction |
-| [USGS 3DEP](https://www.usgs.gov/3d-elevation-program) | A cached three-point-per-region elevation/availability preview through the official point service | A propagation-grade terrain cross-section, global terrain, ocean bathymetry, or acoustic propagation |
-| NASA STCA workbook | Reviewed aircraft identity, geometry, limits, performance points, and source references when populated | A near-field pressure signature unless one is supplied and reviewed |
-
-OpenSky, NOAA, ERA5, and 3DEP are accessed through narrow adapters. Their repositories are not
-copied into MachLane.
-
-## Four-dimensional NOAA matching
-
-Historical analysis does not use a single flight-midpoint atmosphere.
-
-MachLane constructs route samples at no more than 15 statute miles apart. Every sample time is
-interpolated through the real OpenSky observation timeline by traveled distance. Samples are then
-batched by the model data actually needed:
-
-- HRRR: preceding whole-hour archived analysis;
-- GEFS: preceding three-hour archived output on its six-hour cycle.
-
-Every normalized profile retains model, cycle, forecast lead, member, model-valid time,
-interpolation, source URL, retrieval time, and available checksums. The exact OpenSky observation
-times remain separate from the model-valid times, so the evidence shows the temporal match rather
-than implying they are identical.
-
-## Automatic atmospheric regions
-
-The only production policy is `automatic-atmospheric-regions-v1`:
-
-- maximum sampling interval: 15 statute miles;
-- new region after a temperature change greater than 1 °F;
-- new region after an ambient-pressure change greater than 0.02 inHg;
-- new region after a wind-vector change greater than 3 knots;
-- mandatory boundary at a weather-provider, cycle, or model-valid-time change;
-- exact observed polyline retained; no endpoint-chord replacement.
-
-Each region records the variable and change that caused its boundary. These thresholds group
-atmospheric inputs. They are not FAA limits, sonic-boom margins, or evidence that an area is safe.
-
-Once a physical propagation engine exists, this policy should be superseded by adaptive refinement
-until additional sampling changes predicted surface overpressure by less than a reviewed numerical
-tolerance. Additional refinement will be required near ray turning points, terrain interaction,
-model boundaries, and uncertainty-sensitive locations.
-
-## The three route concepts
-
-MachLane keeps these separate:
-
-1. **Historical route** — a real OpenSky observed trajectory.
-2. **Planned route** — a future operator proposal with departure time and a reviewed aircraft phase
-   schedule.
-3. **Compliant operating corridor** — an uncertainty-bounded output from a validated physical
-   propagation engine.
-
-The current UI loads the first. The second fails closed while the aircraft workbook lacks a reviewed
-climb, acceleration, cruise, and descent schedule. The third displays `NOT CALCULATED`.
-
-Atmospheric regions are never called a compliant corridor. Blue/red route coloring represents
-ambient pressure at the research reference altitude, not surface boom overpressure.
-
-## Why MachLane cannot calculate the boom yet
-
-Weather and terrain provide the atmosphere and ground boundary. A defensible sonic-boom result also
-requires:
-
-- a reviewed aircraft near-field pressure signature for the requested operating point;
-- nonlinear propagation, absorption, molecular relaxation, and geometric spreading;
-- primary, secondary-direct, and secondary-indirect ray handling;
-- terrain intersection, ground reflection, and receiver modeling;
-- ground waveform and peak-overpressure metrics;
-- uncertainty analysis;
-- comparison with PCBoom and ultimately flight measurements.
-
-The workspace's sparse 3DEP preview keeps the UI responsive and verifies real U.S. elevation
-availability. Before propagation, it must be replaced by a reviewed high-resolution terrain and
-receiver grid across the acoustic footprint.
-
-The repository contains typed boundaries, readiness checks, a near-field CSV format, SU2 staging,
-and a PCBoom exchange adapter. It does not bundle PCBoom or silently run an unvalidated solver.
-
-## Install
-
-Python 3.11 or newer is required.
+Open Terminal and run:
 
 ```bash
-cd /Users/lucadecaneva/Desktop/machlane
+git clone https://github.com/ldc555/machlane.git
+cd machlane
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[full,gis,dev]"
+python -m pip install -e ".[full,gis]"
 ```
 
-On macOS, GRIB/GIS packages are usually most reliable through the supplied Conda environment:
+The first installation can take several minutes because it includes NOAA GRIB and GIS libraries.
+
+If the GRIB/GIS installation fails, use the supplied Conda environment instead:
 
 ```bash
 conda env create -f environment.yml
 conda activate machlane
-python -m pip install -e ".[full,gis,dev]"
 ```
 
-## Configure OpenSky once
+If you use Conda, replace `source .venv/bin/activate` in the later commands with
+`conda activate machlane`.
+
+### 3. Configure OpenSky once
 
 Each user must use their own OpenSky API client. Never commit or publish a shared client secret.
+Go to the [OpenSky Account page](https://opensky-network.org/my-opensky/account), open
+**API Client Interface**, and generate the two required keys: `client_id` and `client_secret`.
 
-For the current Terminal session:
+OpenSky now uses OAuth2 API clients; website username/password authentication is not accepted by
+the REST API.
 
-```bash
-export OPENSKY_CLIENT_ID="your-client-id"
-export OPENSKY_CLIENT_SECRET="your-client-secret"
-```
+1. Sign in on the [OpenSky Account page](https://opensky-network.org/my-opensky/account).
+2. Find **API Client Interface**.
+3. Generate or activate a new API client.
+4. Copy its `client_id` and `client_secret`. The client ID normally ends in `-api-client`.
 
-For persistent local Streamlit use, create `.streamlit/secrets.toml`:
+See the [official OpenSky authentication documentation](https://openskynetwork.github.io/opensky-api/rest.html#authentication).
 
-```toml
-OPENSKY_CLIENT_ID = "your-client-id"
-OPENSKY_CLIENT_SECRET = "your-client-secret"
-```
+### 4. Save the keys and start MachLane
 
-That file is git-ignored. NOAA and USGS do not require API keys. ERA5 requires a Copernicus account,
-accepted dataset terms, and a local `~/.cdsapirc` file.
-
-## Run
+On macOS using the default zsh Terminal, replace `/path/to/your/machlane` with the location of your
+cloned repository, then paste this complete block:
 
 ```bash
-cd /Users/lucadecaneva/Desktop/machlane
+cd /path/to/your/machlane
 source .venv/bin/activate
-machlane ui
+mkdir -p .streamlit
+read "OPENSKY_CLIENT_ID?OpenSky client ID: "
+read -s "OPENSKY_CLIENT_SECRET?OpenSky client secret: "
+echo
+printf 'OPENSKY_CLIENT_ID = "%s"\nOPENSKY_CLIENT_SECRET = "%s"\n' "$OPENSKY_CLIENT_ID" "$OPENSKY_CLIENT_SECRET" > .streamlit/secrets.toml
+chmod 600 .streamlit/secrets.toml
+streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 8501
 ```
 
-Open [http://localhost:8501](http://localhost:8501). If port 8501 is busy:
+Paste the ID and secret **without adding quotes** when Terminal asks for them. The secret remains
+hidden while you type. The credentials are saved locally, so this setup is required only once.
+The generated file is git-ignored; never commit or share it.
+
+NOAA HRRR/GEFS and USGS 3DEP do not require keys. ERA5 is optional and is not required to start the
+current workspace.
+
+### 5. Open the website
+
+Keep that Terminal window running and visit [http://localhost:8501](http://localhost:8501).
+
+On macOS, this opens Safari directly:
+
+```bash
+open -a Safari http://localhost:8501
+```
+
+If Terminal reports that port 8501 is already in use, stop the previous server with `Control-C`,
+or run:
 
 ```bash
 streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 8502
 ```
 
-The first route-time analysis may download several NOAA pressure-level subsets. Normalized OpenSky,
-NOAA, and 3DEP caches are private, timestamped in evidence, and git-ignored.
+Then visit [http://localhost:8502](http://localhost:8502).
 
-## Other commands
+## Aircraft files: download, drag, and run
+
+Use these aircraft workbooks:
+
+- [NASA ST55 aircraft workbook](https://docs.google.com/spreadsheets/d/1p1tlfufxCVTymZm1oD5O2wBbNvwS_uMJ/edit?usp=share_link&ouid=103289146496595000341&rtpof=true&sd=true) — **use this now**.
+- [Boom XB-1 aircraft workbook](https://docs.google.com/spreadsheets/d/17kS5a2LK2SAAHgEADfnvreDiwKyPZRlu/edit?usp=share_link&ouid=103289146496595000341&rtpof=true&sd=true) — **use only when its missing aircraft and phase data are completed**.
+
+Follow these steps:
+
+1. Open the NASA ST55 link above.
+2. In Google Sheets, select **File → Download → Microsoft Excel (.xlsx)**.
+3. Return to [MachLane](http://localhost:8501).
+4. Click **Load aircraft**.
+5. Drag the downloaded `.xlsx` file into **Drop aircraft Excel here**.
+6. Wait for validation, then confirm that the NASA ST55 fields and 10 flight phases appear.
+7. Click **Save aircraft & open routes**.
+8. Select **DFW → JFK** or **LAX → JFK** under **Mission**.
+9. Select the OpenSky search-ending date. Start with the latest available date.
+10. Click **Run real analysis**.
+11. Let the analysis finish without closing the Terminal or browser. MachLane loads the real
+    OpenSky track, matches NOAA weather across the flight, checks available 3DEP terrain, and forms
+    automatic atmospheric regions.
+12. Use the aircraft-position slider to inspect phase, Mach, altitude, speed, pressure, temperature,
+    wind, and atmospheric region. Use the lower tabs for provenance and exportable evidence.
+
+The first analysis can take several minutes because NOAA files must be downloaded and decoded.
+Later runs reuse local caches. A cached OpenSky route contains only the observed trajectory; weather
+and terrain are loaded separately.
+
+The Boom XB-1 workbook uses the same drag-and-drop process once it is complete. MachLane will save
+an incomplete workbook, but it will not invent a phase profile or start route modeling from one.
+
+## What the analysis uses
+
+- **OpenSky:** observed route geometry, timestamps, altitude observations, flight identity, and provenance.
+- **NOAA HRRR:** archived atmosphere for routes entirely inside the reviewed CONUS coverage.
+- **NOAA GEFS:** archived atmosphere for routes requiring global or oceanic coverage.
+- **USGS 3DEP:** available U.S. terrain previews.
+- **Aircraft workbook:** phase, Mach, altitude, aircraft, performance, fuel, and acoustic inputs that are actually populated.
+
+MachLane keeps the OpenSky historical route, the proposed high-speed flight, and a future compliant
+operating corridor as separate concepts. Atmospheric regions are not labeled as boom-safe areas.
+
+## Why the sonic boom is still locked
+
+Real weather and terrain are necessary but insufficient. A physical result still requires:
+
+- a reviewed aircraft near-field pressure signature or equivalent-area/CFD input;
+- calibrated thrust, drag, fuel-flow, and weight models;
+- validated nonlinear propagation with primary and secondary rays;
+- ground waveform and overpressure metrics;
+- uncertainty analysis and comparison with PCBoom and flight measurements.
+
+Until those inputs exist, the UI reports **Surface boom: not calculated**.
+
+## Restart later
 
 ```bash
-machlane fetch-route --mission-id dfw_jfk --date 2026-08-03T00:00:00+0000
-machlane fetch-weather --provider hrrr --latitude 39 --longitude -98 \
-  --valid-time 2026-08-03T18:00:00+0000
-machlane fetch-terrain --start-latitude 39 --start-longitude -98 \
-  --end-latitude 39 --end-longitude -97.9
-machlane validate-aircraft aircraft_database/NASA_STCA_55T/NASA_STCA_55T_Aircraft.xlsx
-machlane boom-readiness aircraft_database/NASA_STCA_55T/NASA_STCA_55T_Aircraft.xlsx
+cd /path/to/your/machlane
+source .venv/bin/activate
+streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 8501
 ```
 
-Import checks such as `python -c "from open_mco.atmosphere import ..."` are developer diagnostics,
-not a normal startup step.
+The saved OpenSky credentials do not need to be entered again.
 
 ## Development checks
 
@@ -190,22 +175,9 @@ mypy src
 pytest
 ```
 
-Network access is absent from automated tests. Set `MACHLANE_NETWORK_DISABLED=1` to force every live
-adapter to reject network calls during offline development.
+Automated tests are network-free. Downloaded routes, weather, terrain, normalized aircraft files,
+credentials, and generated evidence remain local and are git-ignored.
 
-## Repository layout
-
-```text
-src/open_mco/       installable package
-tests/              network-free automated tests
-aircraft_database/  reviewed workbook interfaces
-configs/            explicit source and research settings
-docs/               architecture, physics, validation, and limitations
-data/               private downloaded/normalized data; ignored
-results/            generated evidence; ignored
-```
-
-See [docs/SONIC_BOOM_PIPELINE.md](docs/SONIC_BOOM_PIPELINE.md),
-[docs/validation_plan.md](docs/validation_plan.md), and
-[docs/assumptions_and_limitations.md](docs/assumptions_and_limitations.md) for the physics and
-validation boundary.
+For the detailed physics boundary, see [Sonic Boom Pipeline](docs/SONIC_BOOM_PIPELINE.md),
+[Validation Plan](docs/validation_plan.md), and
+[Assumptions and Limitations](docs/assumptions_and_limitations.md).
