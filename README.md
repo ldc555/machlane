@@ -8,6 +8,19 @@ high-speed flight analysis.
 > atmospheric conditions. It does **not** yet calculate a sonic-boom footprint, surface
 > overpressure, or compliant operating corridor.
 
+## What the analysis uses
+
+| Source | What MachLane imports | What it does not provide |
+|---|---|---|
+| [OpenSky REST API](https://openskynetwork.github.io/opensky-api/rest.html) | Observed route geometry, timestamps, altitude observations, flight identity, and provenance | A filed future route, weather, or sonic-boom compliance |
+| [NOAA HRRR](https://rapidrefresh.noaa.gov/hrrr/) via [Herbie](https://github.com/blaylockbk/Herbie) | Archived pressure-level atmosphere for routes entirely inside the reviewed CONUS coverage | Global coverage or surface boom overpressure |
+| [NOAA GEFS](https://www.emc.ncep.noaa.gov/emc/pages/numerical_forecast_systems/gefs.php) via Herbie | Archived pressure-level atmosphere for routes requiring global or oceanic coverage | A validated compliance or uncertainty result |
+| [USGS 3DEP](https://www.usgs.gov/3d-elevation-program) | Available U.S. terrain previews from the official elevation service | Propagation-grade global terrain or acoustic propagation |
+| [Aircraft workbook](#aircraft-files-download-drag-and-run) | Populated phase, Mach, altitude, geometry, performance, fuel, and acoustic inputs | Missing engineering values, a near-field signature, or certified limits |
+
+MachLane keeps the OpenSky historical route, the proposed high-speed flight, and a future compliant
+operating corridor as separate concepts. Atmospheric regions are not labeled as boom-safe areas.
+
 ## Quick start
 
 ### 1. Install the prerequisites
@@ -134,17 +147,6 @@ and terrain are loaded separately.
 The Boom XB-1 workbook uses the same drag-and-drop process once it is complete. MachLane will save
 an incomplete workbook, but it will not invent a phase profile or start route modeling from one.
 
-## What the analysis uses
-
-- **OpenSky:** observed route geometry, timestamps, altitude observations, flight identity, and provenance.
-- **NOAA HRRR:** archived atmosphere for routes entirely inside the reviewed CONUS coverage.
-- **NOAA GEFS:** archived atmosphere for routes requiring global or oceanic coverage.
-- **USGS 3DEP:** available U.S. terrain previews.
-- **Aircraft workbook:** phase, Mach, altitude, aircraft, performance, fuel, and acoustic inputs that are actually populated.
-
-MachLane keeps the OpenSky historical route, the proposed high-speed flight, and a future compliant
-operating corridor as separate concepts. Atmospheric regions are not labeled as boom-safe areas.
-
 ## Why the sonic boom is still locked
 
 Real weather and terrain are necessary but insufficient. A physical result still requires:
@@ -181,3 +183,7 @@ credentials, and generated evidence remain local and are git-ignored.
 For the detailed physics boundary, see [Sonic Boom Pipeline](docs/SONIC_BOOM_PIPELINE.md),
 [Validation Plan](docs/validation_plan.md), and
 [Assumptions and Limitations](docs/assumptions_and_limitations.md).
+
+---
+
+Project initiated by [Luca De Caneva](https://github.com/ldc555).
