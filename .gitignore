@@ -20,11 +20,13 @@ credentials*
 data/raw/*
 data/processed/*
 data/cache/*
+data/local/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/cache/.gitkeep
 results/*
 !results/.gitkeep
+outputs/
 /PCBoom*
 pcboom_staging/
 *.pcboom.out

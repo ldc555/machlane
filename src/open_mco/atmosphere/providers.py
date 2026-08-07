@@ -39,7 +39,9 @@ def profiles_at_points(
     batch = getattr(provider, "profiles", None)
     if callable(batch):
         return tuple(batch(points, valid_time))
-    return tuple(provider.profile(latitude, longitude, valid_time) for latitude, longitude in points)
+    return tuple(
+        provider.profile(latitude, longitude, valid_time) for latitude, longitude in points
+    )
 
 
 def profiles_at_spacetime(
@@ -95,12 +97,8 @@ class SyntheticAtmosphereProvider:
     ) -> AtmosphericProfile:
         longitude_phase = math.radians(longitude + 97)
         latitude_phase = math.radians((latitude - 37) * 3)
-        temperature_offset = 2.4 * math.sin(2 * longitude_phase) + 1.2 * math.sin(
-            latitude_phase
-        )
-        pressure_scale = 1 + 0.012 * math.cos(longitude_phase) + 0.006 * math.sin(
-            latitude_phase
-        )
+        temperature_offset = 2.4 * math.sin(2 * longitude_phase) + 1.2 * math.sin(latitude_phase)
+        pressure_scale = 1 + 0.012 * math.cos(longitude_phase) + 0.006 * math.sin(latitude_phase)
         zonal_offset = 10 * math.sin(2 * longitude_phase) + 0.35 * (latitude - 37)
         meridional_offset = 7 * math.sin(latitude_phase) - 4 * math.sin(longitude_phase)
         base_temperature = (288.15, 268.65, 249.15, 229.65, 216.65, 216.65, 216.65)
@@ -181,6 +179,60 @@ class _HerbiePressureProvider:
                 return values if name == "isobaricInPa" else values * 100
         raise ValueError("weather subset has no recognized pressure-level coordinate")
 
+    @staticmethod
+    def _merge_pressure_datasets(datasets: list[Any], xr: Any) -> Any:
+        """Merge GRIB variable groups on their real common pressure levels.
+
+        cfgrib may return GEFS variables as separate datasets because, for example, relative
+        humidity is not published on every level used by height, temperature, and wind. Requiring
+        identical coordinates makes valid GEFS files fail. Intersecting the native pressure levels
+        keeps only physically co-located observations and makes the resulting profile arrays align.
+        """
+
+        pressure_names = ("isobaricInhPa", "isobaricInPa", "pressure", "pressure_level")
+        described: list[tuple[Any, str, np.ndarray[Any, np.dtype[np.float64]]]] = []
+        without_pressure: list[Any] = []
+        for dataset in datasets:
+            name = next(
+                (candidate for candidate in pressure_names if candidate in dataset.coords), None
+            )
+            if name is None:
+                without_pressure.append(dataset)
+                continue
+            raw = np.asarray(dataset.coords[name].values, dtype=float).reshape(-1)
+            levels_hpa = raw / 100 if name == "isobaricInPa" else raw
+            described.append((dataset, name, levels_hpa))
+        if not described:
+            raise ValueError("weather variables have no recognized pressure-level coordinates")
+
+        first_levels = described[0][2]
+        common_levels = np.asarray(
+            [
+                level
+                for level in first_levels
+                if all(np.any(np.isclose(levels, level)) for _, _, levels in described[1:])
+            ],
+            dtype=float,
+        )
+        if common_levels.size == 0:
+            raise ValueError("weather variables have no common pressure levels")
+
+        aligned: list[Any] = []
+        for dataset, name, levels in described:
+            indices = [int(np.argmin(np.abs(levels - level))) for level in common_levels]
+            subset = dataset.isel({name: indices})
+            if name != "isobaricInhPa":
+                subset = subset.rename({name: "isobaricInhPa"})
+            subset = subset.assign_coords(isobaricInhPa=common_levels)
+            aligned.append(subset)
+        aligned.extend(without_pressure)
+        return xr.merge(
+            aligned,
+            join="exact",
+            compat="override",
+            combine_attrs="override",
+        )
+
     def _load(self, valid_time: datetime) -> tuple[Any, datetime]:
         if valid_time.tzinfo is None:
             raise ValueError("valid_time must be timezone-aware")
@@ -220,12 +272,7 @@ class _HerbiePressureProvider:
                 xr = import_module("xarray")
             except ImportError as exc:
                 raise RuntimeError("install MachLane's 'full' extra to merge model fields") from exc
-            dataset = xr.merge(
-                dataset,
-                join="exact",
-                compat="override",
-                combine_attrs="override",
-            )
+            dataset = self._merge_pressure_datasets(dataset, xr)
             if not dataset.sizes.get("isobaricInhPa", 0):
                 raise ValueError("weather variables have no common pressure levels")
         # cfgrib arrays are lazy. Route sampling touches many different grid cells, so retaining
@@ -260,12 +307,8 @@ class _HerbiePressureProvider:
         except ImportError as exc:
             raise RuntimeError("install MachLane's 'full' extra to select model points") from exc
         coordinates = getattr(dataset, "coords", {})
-        latitude_name = next(
-            (name for name in ("latitude", "lat") if name in coordinates), None
-        )
-        longitude_name = next(
-            (name for name in ("longitude", "lon") if name in coordinates), None
-        )
+        latitude_name = next((name for name in ("latitude", "lat") if name in coordinates), None)
+        longitude_name = next((name for name in ("longitude", "lon") if name in coordinates), None)
         if latitude_name is None or longitude_name is None:
             point_frame = pd.DataFrame(
                 {
@@ -353,7 +396,8 @@ class _HerbiePressureProvider:
         zonal = np.asarray(self._variable(point, "u", "ugrd").values, dtype=float).reshape(-1)
         meridional = np.asarray(self._variable(point, "v", "vgrd").values, dtype=float).reshape(-1)
         humidity = np.asarray(self._variable(point, "r", "rh").values, dtype=float).reshape(-1)
-        if np.nanmax(humidity) > 1:
+        finite_humidity = humidity[np.isfinite(humidity)]
+        if finite_humidity.size and np.nanmax(finite_humidity) > 1:
             humidity[:] = humidity / 100
         pressure = self._pressure(point).reshape(-1)
         if (
@@ -370,6 +414,25 @@ class _HerbiePressureProvider:
             != 1
         ):
             raise ValueError("weather pressure-level arrays do not align")
+        valid = (
+            np.isfinite(altitude)
+            & np.isfinite(temperature)
+            & np.isfinite(zonal)
+            & np.isfinite(meridional)
+            & np.isfinite(humidity)
+            & np.isfinite(pressure)
+            & (humidity >= 0)
+            & (humidity <= 1)
+            & (pressure > 0)
+        )
+        if np.count_nonzero(valid) < 2:
+            raise ValueError("weather column has fewer than two complete physical pressure levels")
+        altitude = altitude[valid]
+        temperature = temperature[valid]
+        zonal = zonal[valid]
+        meridional = meridional[valid]
+        humidity = humidity[valid]
+        pressure = pressure[valid]
         order = np.argsort(altitude)
         if self._herbie is None:
             raise RuntimeError("Herbie request metadata was not retained")
@@ -429,7 +492,9 @@ class _HerbiePressureProvider:
         try:
             selected = self._select_points(dataset, points)
         except (AttributeError, KeyError, ValueError) as exc:
-            raise ValueError("MachLane could not extract the requested points from this grid") from exc
+            raise ValueError(
+                "MachLane could not extract the requested points from this grid"
+            ) from exc
         return tuple(
             self._profile_from_point(
                 selected.isel(point=index),

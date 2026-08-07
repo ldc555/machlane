@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from open_mco.atmosphere import SyntheticAtmosphereProvider, noaa_request_for_time
-from open_mco.mission_analysis import build_real_mission_analysis
+from open_mco.mission_analysis import build_real_mission_analysis, planned_scene_atmospheres
 from open_mco.models import (
     AtmosphericSourceMetadata,
     RouteObservation,
@@ -223,3 +223,26 @@ def test_real_mission_rejects_non_opensky_or_untimed_routes(tmp_path) -> None:
             weather_cache_dir=tmp_path / "weather",
             terrain_cache_dir=tmp_path / "terrain",
         )
+
+
+def test_planned_scenes_match_requested_positions_and_times(tmp_path, monkeypatch) -> None:
+    _patch_real_sources(monkeypatch)
+    route = _observed_route()
+    points = ((32.9, -97.0), (33.5, -95.0))
+    times = (
+        datetime(2026, 8, 3, 14, 15, tzinfo=UTC),
+        datetime(2026, 8, 3, 15, 45, tzinfo=UTC),
+    )
+
+    profiles, requests = planned_scene_atmospheres(
+        route,
+        "conus",
+        points,
+        times,
+        weather_cache_dir=tmp_path / "weather",
+    )
+
+    assert len(profiles) == 2
+    assert len(requests) == 2
+    assert profiles[0].latitude == points[0][0]
+    assert profiles[1].source.valid_time == requests[1].valid_time

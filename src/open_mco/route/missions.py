@@ -107,7 +107,6 @@ _AIRPORTS = {
         Airport(
             "TJSJ", "SJU", "Luis Munoz Marin International Airport", 18.439400, -66.001801, "PR-U-A"
         ),
-        Airport("EGLL", "LHR", "London Heathrow Airport", 51.470748, -0.459909, "GB-ENG"),
         Airport("RJAA", "NRT", "Narita International Airport", 35.768580, 140.388714, "JP-12"),
     )
 }
@@ -179,14 +178,6 @@ _MISSIONS = (
         "East Coast to U.S. territory",
         "us_oceanic",
         "Frequent long-haul test case between New York and Puerto Rico.",
-    ),
-    _mission(
-        "jfk_lhr",
-        "JFK",
-        "LHR",
-        "North Atlantic",
-        "global_oceanic",
-        "Classic transatlantic long-haul test case; an observed track is not a future NAT clearance.",
     ),
     _mission(
         "lax_nrt",

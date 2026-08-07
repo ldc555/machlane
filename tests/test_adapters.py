@@ -247,7 +247,7 @@ def test_hrrr_adapter_extracts_and_labels_real_pressure_profile(
                 "t": Variable([220, 250, 280]),
                 "u": Variable([30, 20, 10]),
                 "v": Variable([5, 4, 3]),
-                "r": Variable([40, 50, 60]),
+                "r": Variable([np.nan, 50, 60]),
             }
             self.coords = {"isobaricInhPa": Variable([250, 500, 900])}
 
@@ -291,13 +291,39 @@ def test_hrrr_adapter_extracts_and_labels_real_pressure_profile(
     provider = HerbieHRRRProvider(network_enabled=True, forecast_hour=2, cache_dir=tmp_path)
     profile = provider.profile(39.0, -98.0, datetime(2026, 8, 3, 14, tzinfo=UTC))
 
-    assert profile.altitude_m == (1000.0, 5000.0, 10000.0)
-    assert profile.pressure_pa == (90000.0, 50000.0, 25000.0)
-    assert profile.humidity_fraction == (0.6, 0.5, 0.4)
+    assert profile.altitude_m == (1000.0, 5000.0)
+    assert profile.pressure_pa == (90000.0, 50000.0)
+    assert profile.humidity_fraction == (0.6, 0.5)
     assert profile.source.model_cycle == datetime(2026, 8, 3, 12, tzinfo=UTC)
     assert profile.source.forecast_hour == 2
     assert profile.source.provider == "hrrr_via_herbie"
     assert profile.source.label == "REAL_MODEL_DATA_UNVALIDATED_FOR_OPERATIONAL_USE"
+
+
+def test_gefs_adapter_intersects_variable_pressure_levels_before_merge() -> None:
+    xr = pytest.importorskip("xarray")
+    full_levels = [100, 150, 200, 250, 300]
+    humidity_levels = [200, 250, 300]
+    datasets = [
+        xr.Dataset(
+            {"gh": ("isobaricInhPa", [16_000, 14_000, 12_000, 10_000, 8_000])},
+            coords={"isobaricInhPa": full_levels},
+        ),
+        xr.Dataset(
+            {"t": ("isobaricInhPa", [220, 225, 230, 235, 240])},
+            coords={"isobaricInhPa": full_levels},
+        ),
+        xr.Dataset(
+            {"r": ("isobaricInhPa", [30, 40, 50])}, coords={"isobaricInhPa": humidity_levels}
+        ),
+    ]
+
+    merged = HerbieGEFSProvider._merge_pressure_datasets(datasets, xr)
+
+    assert merged.isobaricInhPa.values.tolist() == humidity_levels
+    assert merged.gh.values.tolist() == [12_000, 10_000, 8_000]
+    assert merged.t.values.tolist() == [230, 235, 240]
+    assert merged.r.values.tolist() == [30, 40, 50]
 
 
 def test_3dep_adapter_samples_a_route_leg(monkeypatch) -> None:

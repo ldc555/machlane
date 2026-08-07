@@ -86,7 +86,7 @@ def test_demo_accepts_injected_atmosphere_provider() -> None:
             return self.delegate.profile(latitude, longitude, valid_time)
 
     provider = RecordingAtmosphereProvider()
-    scenario = build_demo_scenario("jfk_lhr", atmosphere_provider=provider)
+    scenario = build_demo_scenario("lax_jfk", atmosphere_provider=provider)
 
     assert provider.calls
     assert len(scenario.weather_regimes) == len(scenario.route.segments)
@@ -167,7 +167,7 @@ def test_pacific_route_display_does_not_span_the_long_way_around() -> None:
 
 
 def test_weather_segments_are_variable_and_explain_their_boundaries() -> None:
-    scenario = build_demo_scenario("jfk_lhr")
+    scenario = build_demo_scenario("lax_jfk")
     lengths_nmi = [round(segment.distance_m / 1852) for segment in scenario.route.segments]
 
     assert len(scenario.weather_regimes) == len(scenario.route.segments) >= 4
@@ -218,7 +218,7 @@ def test_mock_live_metrics_are_smooth_reproducible_and_route_specific() -> None:
     first = mock_live_metrics(baseline, "dfw_jfk", 0.42)
     repeated = mock_live_metrics(baseline, "dfw_jfk", 0.42)
     adjacent = mock_live_metrics(baseline, "dfw_jfk", 0.43)
-    other_route = mock_live_metrics(baseline, "jfk_lhr", 0.42)
+    other_route = mock_live_metrics(baseline, "lax_jfk", 0.42)
 
     assert first == repeated
     assert first != adjacent

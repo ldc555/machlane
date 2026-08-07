@@ -53,6 +53,32 @@ class RealMissionAnalysis:
     policy_version: str
 
 
+def planned_scene_atmospheres(
+    observed_route: Route,
+    domain: Literal["conus", "us_oceanic", "global_oceanic"],
+    points: tuple[tuple[float, float], ...],
+    sample_times: tuple[datetime, ...],
+    *,
+    weather_cache_dir: str | Path,
+    network_enabled: bool = True,
+) -> tuple[tuple[AtmosphericProfile, ...], tuple[NOAAAtmospherePlan, ...]]:
+    """Match real NOAA profiles to predicted scene positions and UTC times."""
+
+    if len(points) != len(sample_times) or not points:
+        raise ValueError("planned scenes require equal non-empty point and UTC-time arrays")
+    source = observed_route.source
+    if source is None or source.provider != "opensky" or source.data_kind != "observed_track":
+        raise ValueError("planned scenes require a normalized OpenSky baseline track")
+    provider = build_time_aligned_noaa_provider(
+        observed_route,
+        domain,
+        cache_dir=weather_cache_dir,
+        network_enabled=network_enabled,
+    )
+    profiles = profiles_at_spacetime(provider, list(points), list(sample_times))
+    return profiles, provider.plans_used
+
+
 def _inside_us_territory_envelope(latitude: float, longitude: float) -> bool:
     """Conservative request guard for areas where 3DEP may have U.S. land coverage."""
 
@@ -85,7 +111,9 @@ def _region_sample_times(route: Route) -> list[datetime]:
     elapsed = 0.0
     values: list[datetime] = []
     for segment in route.segments:
-        values.append(observation_time_at_progress(route, (elapsed + segment.distance_m / 2) / total))
+        values.append(
+            observation_time_at_progress(route, (elapsed + segment.distance_m / 2) / total)
+        )
         elapsed += segment.distance_m
     return values
 
@@ -136,7 +164,9 @@ def build_real_mission_analysis(
         sample_times=route_times,
     )
 
-    region_points = [interpolate_segment_position(segment) for segment in atmospheric_route.segments]
+    region_points = [
+        interpolate_segment_position(segment) for segment in atmospheric_route.segments
+    ]
     region_times = _region_sample_times(atmospheric_route)
     segment_atmospheres = profiles_at_spacetime(noaa, region_points, region_times)
 
@@ -153,13 +183,11 @@ def build_real_mission_analysis(
     with ThreadPoolExecutor(max_workers=6) as executor:
         for index, segment in enumerate(atmospheric_route.segments):
             if not _segment_may_have_3dep(segment):
-                terrain_regions[index] = (
-                    TerrainRegionResult(
-                        segment_id=segment.segment_id,
-                        status="OUTSIDE_REVIEWED_COVERAGE",
-                        profile=None,
-                        reason="Outside MachLane's conservative U.S. 3DEP request envelope",
-                    )
+                terrain_regions[index] = TerrainRegionResult(
+                    segment_id=segment.segment_id,
+                    status="OUTSIDE_REVIEWED_COVERAGE",
+                    profile=None,
+                    reason="Outside MachLane's conservative U.S. 3DEP request envelope",
                 )
                 continue
             terrain_requests[executor.submit(terrain_provider.profile, segment)] = (index, segment)
@@ -168,22 +196,18 @@ def build_real_mission_analysis(
             try:
                 profile = future.result()
             except (RuntimeError, ValueError, OSError, KeyError) as exc:
-                terrain_regions[index] = (
-                    TerrainRegionResult(
-                        segment_id=segment.segment_id,
-                        status="UNAVAILABLE",
-                        profile=None,
-                        reason=str(exc),
-                    )
+                terrain_regions[index] = TerrainRegionResult(
+                    segment_id=segment.segment_id,
+                    status="UNAVAILABLE",
+                    profile=None,
+                    reason=str(exc),
                 )
             else:
-                terrain_regions[index] = (
-                    TerrainRegionResult(
-                        segment_id=segment.segment_id,
-                        status="LOADED",
-                        profile=profile,
-                        reason="Real USGS 3DEP sparse availability preview loaded",
-                    )
+                terrain_regions[index] = TerrainRegionResult(
+                    segment_id=segment.segment_id,
+                    status="LOADED",
+                    profile=profile,
+                    reason="Real USGS 3DEP sparse availability preview loaded",
                 )
     if any(result is None for result in terrain_regions):
         raise RuntimeError("terrain availability sampling returned an incomplete region set")

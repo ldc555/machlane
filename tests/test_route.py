@@ -52,13 +52,14 @@ def test_mission_catalog_uses_real_endpoints_and_wgs84_distance() -> None:
         "dfw_jfk",
         "dfw_lax",
         "lax_jfk",
-        "jfk_lhr",
         "jfk_sju",
         "bos_hnl",
         "lax_nrt",
     }
     assert "den_nrt" not in mission_ids
     assert "lax_hnl" not in mission_ids
+    assert "jfk_lhr" not in mission_ids
+    assert "lhr_jfk" not in mission_ids
 
     route = get_mission("dfw_jfk").build_route()
     assert route.waypoints == ((32.896801, -97.038002), (40.639447, -73.779317))

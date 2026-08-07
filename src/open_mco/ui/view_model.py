@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 from pyproj import Geod
 
+from open_mco.aircraft import AircraftDefinition, FlightPlanEstimate
 from open_mco.atmosphere import project_wind_onto_bearing
 from open_mco.models import AtmosphericProfile, PlannerResult, Route
 from open_mco.route import corridor_geojson, interpolate_position, observation_time_at_progress
@@ -19,6 +20,77 @@ METERS_TO_NAUTICAL_MILES = 1 / 1852
 METERS_PER_SECOND_TO_KNOTS = 1.943844492
 PASCALS_TO_INHG = 1 / 3386.389
 _GEOD = Geod(ellps="WGS84")
+
+
+def continuous_planned_state(
+    progress: float,
+    aircraft: AircraftDefinition,
+    flight_plan: FlightPlanEstimate,
+) -> dict[str, float | str]:
+    """Interpolate the source-backed phase envelope over the complete route.
+
+    Route progress is mapped through the calculated phase distances. The climb uses every
+    aircraft profile point, while descent and landing use the explicit phase endpoints from the
+    flight-plan estimate. This is a presentation interpolation, not an aircraft dynamics model.
+    """
+
+    fraction = min(1.0, max(0.0, progress))
+    if len(flight_plan.phases) != 4:
+        raise ValueError("continuous display requires climb, cruise, descent, and approach")
+    climb, cruise, descent, approach = flight_plan.phases
+    total_distance = sum(phase.distance_miles for phase in flight_plan.phases)
+    if total_distance <= 0:
+        raise ValueError("flight-plan phase distance must be positive")
+    climb_end = climb.distance_miles / total_distance
+    cruise_end = climb_end + cruise.distance_miles / total_distance
+    descent_end = cruise_end + descent.distance_miles / total_distance
+
+    def blend(start: float, end: float, amount: float) -> float:
+        return start + (end - start) * min(1.0, max(0.0, amount))
+
+    if fraction <= climb_end:
+        climb_points = aircraft.phase_profile[:-1]
+        if len(climb_points) < 2:
+            raise ValueError("aircraft profile requires at least two climb points")
+        scaled = fraction / max(climb_end, 1e-9) * (len(climb_points) - 1)
+        left_index = min(len(climb_points) - 2, math.floor(scaled))
+        local = scaled - left_index
+        left = climb_points[left_index]
+        right = climb_points[left_index + 1]
+        phase = left.phase if fraction == 0 else right.phase
+        altitude_ft = blend(left.altitude_ft, right.altitude_ft, local)
+        mach = blend(left.mach, right.mach, local)
+        elapsed_min = climb.duration_min * fraction / max(climb_end, 1e-9)
+    elif fraction <= cruise_end:
+        local = (fraction - climb_end) / max(cruise_end - climb_end, 1e-9)
+        phase = cruise.phase
+        altitude_ft = cruise.start_altitude_ft
+        mach = cruise.start_mach
+        elapsed_min = climb.duration_min + cruise.duration_min * local
+    elif fraction <= descent_end:
+        local = (fraction - cruise_end) / max(descent_end - cruise_end, 1e-9)
+        phase = descent.phase
+        altitude_ft = blend(descent.start_altitude_ft, descent.end_altitude_ft, local)
+        mach = blend(descent.start_mach, descent.end_mach, local)
+        elapsed_min = climb.duration_min + cruise.duration_min + descent.duration_min * local
+    else:
+        local = (fraction - descent_end) / max(1.0 - descent_end, 1e-9)
+        phase = approach.phase
+        altitude_ft = blend(approach.start_altitude_ft, approach.end_altitude_ft, local)
+        mach = blend(approach.start_mach, approach.end_mach, local)
+        elapsed_min = (
+            climb.duration_min
+            + cruise.duration_min
+            + descent.duration_min
+            + approach.duration_min * local
+        )
+
+    return {
+        "phase": phase,
+        "altitude_ft": altitude_ft,
+        "mach": mach,
+        "elapsed_min": elapsed_min,
+    }
 
 
 def pressure_color(value_hpa: float, minimum_hpa: float, maximum_hpa: float) -> list[int]:
@@ -241,9 +313,10 @@ def observed_flight_state(route: Route, progress: float) -> dict[str, object]:
     following = observations[current_index + 1]
     altitude_m: float | None = None
     if current.barometric_altitude_m is not None and following.barometric_altitude_m is not None:
-        altitude_m = current.barometric_altitude_m + (
-            following.barometric_altitude_m - current.barometric_altitude_m
-        ) * local
+        altitude_m = (
+            current.barometric_altitude_m
+            + (following.barometric_altitude_m - current.barometric_altitude_m) * local
+        )
     on_ground = current.on_ground and following.on_ground
     available_altitudes = [
         observation.barometric_altitude_m
