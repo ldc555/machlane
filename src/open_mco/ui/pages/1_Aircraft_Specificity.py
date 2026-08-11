@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import plotly.graph_objects as go  # type: ignore[import-untyped]
 import streamlit as st
+from plotly.subplots import make_subplots  # type: ignore[import-untyped]
 
 from open_mco.aircraft import (
     AircraftDefinition,
@@ -56,15 +58,18 @@ p,label { color:#d7e5f1; }
 title, back = st.columns([5, 1], vertical_alignment="center")
 with title:
     st.markdown("# Aircraft")
-    st.caption("Drop the NASA STCA or Boom/XB-1 Excel file. MachLane detects and populates it.")
+    st.caption(
+        "Drop the LM1021, NASA STCA, or Boom/XB-1 Excel file. "
+        "MachLane detects and populates it."
+    )
 with back:
     st.markdown("[← **MISSION WORKSPACE**](/)")
 
 uploaded = st.file_uploader(
     "DROP AIRCRAFT EXCEL HERE",
-    type=["xlsx"],
+    type=["xlsx", "xlsm"],
     help=(
-        "Accepted: the populated NASA STCA workbook or the current Boom/XB-1 workbook contract. "
+        "Accepted: LM1021, NASA STCA, or the current Boom/XB-1 workbook contract. "
         "MachLane never fills unsupported engineering values."
     ),
 )
@@ -83,7 +88,10 @@ if uploaded is not None:
         )
 
 if definition is None:
-    st.info("No aircraft is preloaded. Drop a NASA STCA or Boom/XB-1 `.xlsx` file above.")
+    st.info(
+        "No aircraft is preloaded. Drop an LM1021, NASA STCA, or Boom/XB-1 "
+        "`.xlsx` or `.xlsm` file above."
+    )
     st.stop()
 active_definition = definition
 
@@ -94,11 +102,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-status_a, status_b, status_c, status_d = st.columns(4)
+status_a, status_b, status_c, status_d, status_e = st.columns(5)
 status_a.metric("Required fields", f"{len(active_definition.missing_required_fields)} missing")
 status_b.metric("Performance deck", f"{len(active_definition.performance_map)} points")
 status_c.metric("Near-field", f"{len(active_definition.nearfield_samples)} samples")
 status_d.metric("Flight phases", f"{len(active_definition.phase_profile)} points")
+status_e.metric(
+    "Atmosphere benchmarks", f"{len(active_definition.benchmark_atmospheres)} profiles"
+)
 
 editor_version = active_definition.workbook_checksum or f"revision-{active_definition.revision}"
 
@@ -159,6 +170,91 @@ def _edit_fields(section: str, label: str) -> pd.DataFrame:
     )
 
 
+def _nearfield_figure(frame: pd.DataFrame, azimuth_deg: float) -> go.Figure:
+    selected = frame.loc[frame["azimuth_deg"] == azimuth_deg].sort_values(
+        "axial_position_ft"
+    )
+    figure = go.Figure(
+        go.Scatter(
+            x=selected["axial_position_ft"],
+            y=selected["delta_pressure_psf"],
+            mode="lines",
+            line={"color": "#36c5f0", "width": 2.5},
+            hovertemplate="%{x:,.1f} ft<br>%{y:+.4f} psf<extra></extra>",
+        )
+    )
+    figure.add_hline(y=0, line_color="#8aa4bd", line_width=1)
+    figure.update_layout(
+        template="plotly_dark",
+        height=430,
+        margin={"l": 20, "r": 20, "t": 50, "b": 20},
+        paper_bgcolor="#0b1725",
+        plot_bgcolor="#0b1725",
+        font={"color": "#e7f2ff"},
+        title={
+            "text": f"LM1021 near-field pressure signature · azimuth {azimuth_deg:g}°",
+            "font": {"color": "#ffffff", "size": 20},
+        },
+        xaxis_title="Axial position (ft)",
+        yaxis_title="Near-field Δp (psf)",
+        hovermode="x unified",
+    )
+    return figure
+
+
+def _benchmark_figure(profile: Any) -> go.Figure:
+    altitude_ft = [value * 3.280839895 for value in profile.altitude_m]
+    temperature_f = [(value - 273.15) * 9 / 5 + 32 for value in profile.temperature_k]
+    pressure_inhg = [value * 0.000295299830714 for value in profile.pressure_pa]
+    wind_kt = [
+        (u**2 + v**2) ** 0.5 * 1.943844492
+        for u, v in zip(profile.zonal_wind_mps, profile.meridional_wind_mps, strict=True)
+    ]
+    humidity_percent = [value * 100 for value in profile.humidity_fraction]
+    figure = make_subplots(
+        rows=1,
+        cols=4,
+        shared_yaxes=True,
+        horizontal_spacing=0.055,
+        subplot_titles=("Temperature", "Pressure", "Wind speed", "Humidity"),
+    )
+    series = (
+        (temperature_f, "#ffbd59", "°F"),
+        (pressure_inhg, "#ff5b79", "inHg"),
+        (wind_kt, "#36c5f0", "kt"),
+        (humidity_percent, "#7ee787", "%"),
+    )
+    for column, (values, color, unit) in enumerate(series, start=1):
+        figure.add_trace(
+            go.Scatter(
+                x=values,
+                y=altitude_ft,
+                mode="lines+markers",
+                line={"color": color, "width": 2.3},
+                marker={"size": 5},
+                showlegend=False,
+                hovertemplate=f"%{{x:.2f}} {unit}<br>%{{y:,.0f}} ft<extra></extra>",
+            ),
+            row=1,
+            col=column,
+        )
+    figure.update_yaxes(title_text="Altitude (ft)", row=1, col=1)
+    figure.update_layout(
+        template="plotly_dark",
+        height=500,
+        margin={"l": 20, "r": 20, "t": 60, "b": 20},
+        paper_bgcolor="#0b1725",
+        plot_bgcolor="#0b1725",
+        font={"color": "#e7f2ff"},
+        title={
+            "text": f"{profile.display_name} · propagation validation benchmark",
+            "font": {"color": "#ffffff", "size": 20},
+        },
+    )
+    figure.update_annotations(font_color="#e7f2ff")
+    return figure
+
+
 general_tab, limits_tab, mission_tab, performance_tab, phase_tab, boom_tab = st.tabs(
     [
         "General",
@@ -180,7 +276,10 @@ with mission_tab:
     edited_frames["Mission Config"] = _edit_fields(
         "Mission Config", "Planning configuration"
     )
-    st.info("NOAA provides the route- and time-matched atmosphere. No ISA table is imported.")
+    st.info(
+        "NOAA provides the operational route- and time-matched atmosphere. NASA profiles "
+        "1, 2, and the standard atmosphere remain isolated validation benchmarks."
+    )
 with performance_tab:
     st.markdown("### Calibrated aircraft deck")
     st.caption(
@@ -269,12 +368,70 @@ with boom_tab:
     edited_frames["Sonic Boom"] = _edit_fields(
         "Sonic Boom", "Acoustic model and validation metadata"
     )
-    if active_definition.nearfield_samples:
-        st.dataframe(
-            pd.DataFrame([item.model_dump() for item in active_definition.nearfield_samples]),
-            hide_index=True,
-            width="stretch",
-        )
+    waveform_tab, atmosphere_tab, raw_tab = st.tabs(
+        ["Near-field waveform", "Atmosphere benchmarks", "Raw imported samples"]
+    )
+    with waveform_tab:
+        if active_definition.nearfield_samples:
+            nearfield_frame = pd.DataFrame(
+                [item.model_dump() for item in active_definition.nearfield_samples]
+            )
+            azimuths = sorted(float(value) for value in nearfield_frame["azimuth_deg"].unique())
+            default_azimuth = azimuths.index(0.0) if 0.0 in azimuths else 0
+            azimuth = st.selectbox(
+                "Near-field azimuth",
+                azimuths,
+                index=default_azimuth,
+                format_func=lambda value: f"{value:g}°",
+            )
+            st.plotly_chart(
+                _nearfield_figure(nearfield_frame, float(azimuth)), width="stretch"
+            )
+            selected = nearfield_frame.loc[nearfield_frame["azimuth_deg"] == azimuth]
+            wave_a, wave_b, wave_c, wave_d = st.columns(4)
+            wave_a.metric("Samples", f"{len(selected):,}")
+            wave_b.metric("Mach", f"{selected['mach'].iloc[0]:.2f}")
+            wave_c.metric("Altitude", f"{selected['altitude_ft'].iloc[0]:,.0f} ft")
+            wave_d.metric(
+                "Reference distance", f"{selected['reference_distance_ft'].iloc[0]:,.1f} ft"
+            )
+            st.caption(
+                "This is the aircraft pressure field at the NASA extraction cylinder—not a "
+                "ground waveform and not surface boom overpressure."
+            )
+        else:
+            st.warning("No near-field signature samples were imported.")
+    with atmosphere_tab:
+        if active_definition.benchmark_atmospheres:
+            profiles = {
+                profile.profile_id: profile
+                for profile in active_definition.benchmark_atmospheres
+            }
+            selected_profile_id = st.selectbox(
+                "NASA validation atmosphere",
+                list(profiles),
+                format_func=lambda value: profiles[value].display_name,
+            )
+            selected_profile = profiles[selected_profile_id]
+            st.plotly_chart(_benchmark_figure(selected_profile), width="stretch")
+            benchmark_state = (
+                "REQUIRED LM1021 BENCHMARK"
+                if selected_profile.required_for_validation
+                else "OPTIONAL CROSS-CHECK"
+            )
+            st.info(
+                f"{benchmark_state}. These profiles reproduce the NASA workshop cases. "
+                "Real route calculations use NOAA instead."
+            )
+            st.markdown(f"[Open NASA source]({selected_profile.source_url})")
+        else:
+            st.warning(
+                "No NASA benchmark atmospheres were imported. NOAA can model a real route, "
+                "but the LM1021 propagation implementation cannot be benchmarked reproducibly."
+            )
+    with raw_tab:
+        if active_definition.nearfield_samples:
+            st.dataframe(nearfield_frame, hide_index=True, width="stretch")
     st.markdown(
         """
 <div class="gate"><b>Surface boom stays locked until the required physics exists.</b><br/>A condition-specific near-field signature or equivalent-area/CFD input, a nonlinear propagation engine, primary and secondary rays, ground waveform metrics, and PCBoom/flight-measurement validation are required.</div>
@@ -349,6 +506,7 @@ def _build_definition() -> AircraftDefinition:
         phase_timing=phase_timings,
         performance_map=active_definition.performance_map,
         nearfield_samples=active_definition.nearfield_samples,
+        benchmark_atmospheres=active_definition.benchmark_atmospheres,
         workbook_checksum=active_definition.workbook_checksum,
     )
 
@@ -395,7 +553,8 @@ with readiness_col:
     if not active_definition.nearfield_ready:
         blockers.append("near-field pressure signature")
     st.caption(
-        "Aircraft planning inputs are complete."
+        "Workbook aircraft inputs are present. A physical ground-boom result remains "
+        "locked until a reviewed propagation solver is registered."
         if not blockers
         else "Still required for full continuous boom analysis: " + ", ".join(blockers) + "."
     )

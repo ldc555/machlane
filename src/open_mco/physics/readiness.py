@@ -9,7 +9,11 @@ from typing import Any
 from openpyxl import load_workbook
 from pydantic import Field
 
-from open_mco.aircraft import AircraftWorkbookError, load_aircraft_workbook
+from open_mco.aircraft import (
+    AircraftWorkbookError,
+    load_aircraft_definition_workbook,
+    load_aircraft_workbook,
+)
 from open_mco.aircraft.loader import REQUIRED_SHEETS, sha256_file
 from open_mco.models import FrozenModel
 from open_mco.physics.signatures import NearFieldSignatureError, read_near_field_samples
@@ -90,6 +94,12 @@ def assess_boom_readiness(
 
     checksum = sha256_file(path)
     workbook = load_workbook(path, data_only=True, read_only=True)
+    current_definition = None
+    if "Sonic_Boom" in workbook.sheetnames and "Nearfield_Signatures" in workbook.sheetnames:
+        try:
+            current_definition = load_aircraft_definition_workbook(path)
+        except AircraftWorkbookError:
+            current_definition = None
     missing_sheets = sorted(REQUIRED_SHEETS - set(workbook.sheetnames))
     if missing_sheets:
         return BoomReadinessReport(
@@ -127,7 +137,8 @@ def assess_boom_readiness(
         )
     else:
         try:
-            load_aircraft_workbook(path)
+            if current_definition is None:
+                load_aircraft_workbook(path)
         except AircraftWorkbookError as exc:
             checks.append(
                 ReadinessCheck(
@@ -166,19 +177,41 @@ def assess_boom_readiness(
         for name in ("Required Reliability", "Boom Limit")
         if mission_values.get(name) in (None, "")
     ]
+    declared_limit = mission_values.get("Boom Limit")
+    limit_mismatch = False
+    if not mission_missing:
+        try:
+            limit_mismatch = abs(float(str(declared_limit)) - 0.11) > 1e-9
+        except (TypeError, ValueError):
+            limit_mismatch = True
     checks.append(
         ReadinessCheck(
             key="mission_acceptance_inputs",
-            status=(ReadinessStatus.MISSING_INPUT if mission_missing else ReadinessStatus.READY),
+            status=(
+                ReadinessStatus.MISSING_INPUT
+                if mission_missing
+                else ReadinessStatus.INVALID
+                if limit_mismatch
+                else ReadinessStatus.READY
+            ),
             detail=(
                 f"Blank mission settings: {', '.join(mission_missing)}"
                 if mission_missing
-                else "Reliability target and boom limit are populated."
+                else (
+                    f"Workbook boom limit is {declared_limit} psf; the current FAA NPRM "
+                    "research threshold is 0.11 psf."
+                    if limit_mismatch
+                    else "Reliability target and 0.11 psf research threshold are populated."
+                )
             ),
             action=(
                 "Populate reviewed mission settings and units."
                 if mission_missing
-                else None
+                else (
+                    "Keep benchmark thresholds separate and set operational screening to 0.11 psf."
+                    if limit_mismatch
+                    else None
+                )
             ),
         )
     )
@@ -191,7 +224,43 @@ def assess_boom_readiness(
             signature_path = Path(str(declared))
             if not signature_path.is_absolute():
                 signature_path = path.parent / signature_path
-    if signature_path is None:
+    if (
+        signature_path is None
+        and current_definition is not None
+        and current_definition.nearfield_samples
+    ):
+        operating_points = {
+            (sample.mach, sample.altitude_ft, sample.reference_distance_ft)
+            for sample in current_definition.nearfield_samples
+        }
+        checks.append(
+            ReadinessCheck(
+                key="near_field_signature",
+                status=ReadinessStatus.READY,
+                detail=(
+                    f"{len(current_definition.nearfield_samples):,} embedded near-field samples "
+                    f"cover {len(operating_points)} declared operating point(s)."
+                ),
+                action="Fail closed whenever the requested aircraft state is outside this coverage.",
+            )
+        )
+        if len(operating_points) == 1:
+            checks.append(
+                ReadinessCheck(
+                    key="near_field_operating_envelope",
+                    status=ReadinessStatus.MISSING_INPUT,
+                    detail=(
+                        "The embedded near-field data covers only one Mach/altitude/reference-"
+                        "distance operating point. It supports the LM1021 benchmark, not a "
+                        "continuous climb/cruise/descent route envelope."
+                    ),
+                    action=(
+                        "Add reviewed signatures for every supersonic operating state or constrain "
+                        "physical analysis to the exact Mach 1.6 / 55,000 ft benchmark point."
+                    ),
+                )
+            )
+    elif signature_path is None:
         checks.append(
             ReadinessCheck(
                 key="near_field_signature",
@@ -220,6 +289,32 @@ def assess_boom_readiness(
                     detail=f"Signature schema and samples are valid: {signature_path}",
                 )
             )
+
+    if current_definition is not None:
+        benchmark_ids = {
+            profile.profile_id for profile in current_definition.benchmark_atmospheres
+        }
+        benchmark_ready = "nasa_profile_1" in benchmark_ids
+        checks.append(
+            ReadinessCheck(
+                key="propagation_benchmark_atmospheres",
+                status=(
+                    ReadinessStatus.READY
+                    if benchmark_ready
+                    else ReadinessStatus.MISSING_INPUT
+                ),
+                detail=(
+                    f"Imported {len(benchmark_ids)} NASA propagation benchmark atmosphere(s)."
+                    if benchmark_ready
+                    else "NASA LM1021 required atmosphere profile 1 is not embedded."
+                ),
+                action=(
+                    None
+                    if benchmark_ready
+                    else "Import NASA atmosphere profile 1 before validating the solver."
+                ),
+            )
+        )
 
     checks.extend(
         (

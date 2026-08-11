@@ -129,6 +129,58 @@ def test_normalized_aircraft_excel_round_trips() -> None:
     assert restored.nearfield_samples == original.nearfield_samples
 
 
+def test_lm1021_benchmark_atmospheres_import_and_round_trip() -> None:
+    workbook = load_workbook(TEMPLATE)
+    headers = [
+        "Altitude (m)",
+        "Temperature (K)",
+        "X-wind (m/s)",
+        "Y-wind (m/s)",
+        "RH (%)",
+        "Pressure (Pa)",
+        "Source",
+    ]
+    for number in (1, 2):
+        sheet = workbook.create_sheet(f"NASA_Atmosphere_Profile_{number}")
+        sheet.append(headers)
+        sheet.append([200, 267, -3, 1, 90, 98_000, f"https://example.test/profile-{number}"])
+        sheet.append([16_000, 220, 20, -10, 1, 10_000, f"https://example.test/profile-{number}"])
+    standard = workbook.create_sheet("NASA_Standard_Atmosphere")
+    standard.append(["NASA standard atmosphere"])
+    standard.append([])
+    standard.append([])
+    standard.append(
+        [
+            "Altitude (m)",
+            "Temperature (K)",
+            "Pressure (Pa)",
+            None,
+            "Altitude (m)",
+            "Relative humidity (%)",
+        ]
+    )
+    standard.append([0, 288.15, 101_325, None, 0, 60])
+    standard.append([20_000, 216.65, 5_497, None, 20_000, 1])
+    payload = BytesIO()
+    workbook.save(payload)
+
+    aircraft = load_aircraft_definition_workbook(payload.getvalue())
+
+    assert [profile.profile_id for profile in aircraft.benchmark_atmospheres] == [
+        "nasa_profile_1",
+        "nasa_profile_2",
+        "nasa_standard",
+    ]
+    assert aircraft.benchmark_atmospheres[0].required_for_validation
+    assert aircraft.benchmark_atmospheres[0].humidity_fraction == (0.9, 0.01)
+    assert aircraft.benchmark_atmospheres[2].zonal_wind_mps == (0.0, 0.0)
+
+    restored = load_aircraft_definition_workbook(
+        export_aircraft_definition_workbook(aircraft)
+    )
+    assert restored.benchmark_atmospheres == aircraft.benchmark_atmospheres
+
+
 def test_aircraft_one_import_rejects_a_missing_contract_sheet() -> None:
     workbook = load_workbook(TEMPLATE)
     del workbook["Nearfield_Signatures"]

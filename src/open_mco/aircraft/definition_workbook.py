@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from contextlib import suppress
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -16,10 +17,20 @@ from .loader import AircraftWorkbookError
 from .specification import (
     AircraftDefinition,
     AircraftField,
+    AtmosphereBenchmarkProfile,
     NearFieldSample,
     PerformancePoint,
     PhasePoint,
     PhaseTiming,
+)
+
+NASA_PROFILE_BASE_URL = (
+    "https://lbpw-ftp.larc.nasa.gov/sbpw2/propagation/lm1021/atmospheric_profiles"
+)
+BENCHMARK_PROFILE_SHEETS = (
+    "NASA_Atmosphere_Profile_1",
+    "NASA_Atmosphere_Profile_2",
+    "NASA_Standard_Atmosphere",
 )
 
 PARAMETER_HEADERS = [
@@ -352,6 +363,7 @@ def _load_legacy_definition(workbook: Any, payload: bytes) -> AircraftDefinition
         phase_timing=_legacy_phase_timing(workbook),
         performance_map=(),
         nearfield_samples=(),
+        benchmark_atmospheres=(),
         workbook_checksum=hashlib.sha256(payload).hexdigest(),
     )
 
@@ -517,6 +529,189 @@ def _nearfield_samples(workbook: Any) -> tuple[NearFieldSample, ...]:
     return tuple(samples)
 
 
+def _float_cell(value: Any, sheet_name: str, row: int, column: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise AircraftWorkbookError(
+            f"{sheet_name} row {row} has invalid {column}"
+        ) from exc
+
+
+def _linear_value(x: float, xs: list[float], ys: list[float]) -> float:
+    if x <= xs[0]:
+        return ys[0]
+    if x >= xs[-1]:
+        return ys[-1]
+    for left, right in zip(range(len(xs) - 1), range(1, len(xs)), strict=True):
+        if xs[left] <= x <= xs[right]:
+            fraction = (x - xs[left]) / (xs[right] - xs[left])
+            return ys[left] + fraction * (ys[right] - ys[left])
+    raise AssertionError("interpolation interval was not found")
+
+
+def _tabular_benchmark_profile(
+    sheet: Any,
+    *,
+    profile_id: str,
+    display_name: str,
+    required_for_validation: bool,
+    default_source_url: str,
+) -> AtmosphereBenchmarkProfile:
+    expected = [
+        "Altitude (m)",
+        "Temperature (K)",
+        "X-wind (m/s)",
+        "Y-wind (m/s)",
+        "RH (%)",
+        "Pressure (Pa)",
+    ]
+    header_row = next(
+        (
+            index
+            for index, row in enumerate(sheet.iter_rows(values_only=True), start=1)
+            if list(row[:6]) == expected
+        ),
+        None,
+    )
+    if header_row is None:
+        raise AircraftWorkbookError(
+            f"{sheet.title} must contain columns: {' | '.join(expected)}"
+        )
+    rows: list[tuple[float, float, float, float, float, float]] = []
+    source_url = default_source_url
+    for index, row in enumerate(
+        sheet.iter_rows(min_row=header_row + 1, values_only=True), start=header_row + 1
+    ):
+        if row[0] in (None, ""):
+            continue
+        rows.append(
+            (
+                _float_cell(row[0], sheet.title, index, expected[0]),
+                _float_cell(row[1], sheet.title, index, expected[1]),
+                _float_cell(row[2], sheet.title, index, expected[2]),
+                _float_cell(row[3], sheet.title, index, expected[3]),
+                _float_cell(row[4], sheet.title, index, expected[4]) / 100.0,
+                _float_cell(row[5], sheet.title, index, expected[5]),
+            )
+        )
+        if len(row) > 6 and _text(row[6]):
+            source_url = _text(row[6]) or source_url
+    rows.sort(key=lambda item: item[0])
+    if len(rows) < 2:
+        raise AircraftWorkbookError(f"{sheet.title} requires at least two atmosphere rows")
+    return AtmosphereBenchmarkProfile(
+        profile_id=profile_id,
+        display_name=display_name,
+        altitude_m=tuple(row[0] for row in rows),
+        temperature_k=tuple(row[1] for row in rows),
+        zonal_wind_mps=tuple(row[2] for row in rows),
+        meridional_wind_mps=tuple(row[3] for row in rows),
+        humidity_fraction=tuple(row[4] for row in rows),
+        pressure_pa=tuple(row[5] for row in rows),
+        source_name="NASA Sonic Boom Prediction Workshop 2 · LM1021",
+        source_url=source_url,
+        required_for_validation=required_for_validation,
+        notes=(
+            "Required LM1021 propagation benchmark atmosphere."
+            if required_for_validation
+            else "Optional LM1021 propagation benchmark atmosphere."
+        ),
+    )
+
+
+def _standard_benchmark_profile(sheet: Any) -> AtmosphereBenchmarkProfile:
+    common_header = [
+        "Altitude (m)",
+        "Temperature (K)",
+        "X-wind (m/s)",
+        "Y-wind (m/s)",
+        "RH (%)",
+        "Pressure (Pa)",
+    ]
+    if any(
+        list(row[:6]) == common_header for row in sheet.iter_rows(values_only=True)
+    ):
+        return _tabular_benchmark_profile(
+            sheet,
+            profile_id="nasa_standard",
+            display_name="Profile 3 · NASA standard atmosphere",
+            required_for_validation=False,
+            default_source_url=f"{NASA_PROFILE_BASE_URL}/standard_atmo.txt",
+        ).model_copy(
+            update={
+                "notes": "Optional no-wind standard-atmosphere LM1021 propagation benchmark."
+            }
+        )
+
+    temperature_pressure: list[tuple[float, float, float]] = []
+    humidity: list[tuple[float, float]] = []
+    for index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+        if index <= 4:
+            continue
+        if len(row) >= 3 and row[0] not in (None, "") and row[1] not in (None, ""):
+            with suppress(TypeError, ValueError):
+                temperature_pressure.append(
+                    (float(row[0]), float(row[1]), float(row[2]))
+                )
+        if len(row) >= 6 and row[4] not in (None, "") and row[5] not in (None, ""):
+            with suppress(TypeError, ValueError):
+                humidity.append((float(row[4]), float(row[5]) / 100.0))
+    temperature_pressure.sort(key=lambda item: item[0])
+    humidity.sort(key=lambda item: item[0])
+    if len(temperature_pressure) < 2 or len(humidity) < 2:
+        raise AircraftWorkbookError(
+            "NASA_Standard_Atmosphere requires temperature/pressure and humidity tables"
+        )
+    humidity_altitudes = [row[0] for row in humidity]
+    humidity_values = [row[1] for row in humidity]
+    altitudes = tuple(row[0] for row in temperature_pressure)
+    return AtmosphereBenchmarkProfile(
+        profile_id="nasa_standard",
+        display_name="Profile 3 · NASA standard atmosphere",
+        altitude_m=altitudes,
+        temperature_k=tuple(row[1] for row in temperature_pressure),
+        pressure_pa=tuple(row[2] for row in temperature_pressure),
+        zonal_wind_mps=tuple(0.0 for _ in altitudes),
+        meridional_wind_mps=tuple(0.0 for _ in altitudes),
+        humidity_fraction=tuple(
+            _linear_value(altitude, humidity_altitudes, humidity_values)
+            for altitude in altitudes
+        ),
+        source_name="NASA Sonic Boom Prediction Workshop 2 · LM1021",
+        source_url=f"{NASA_PROFILE_BASE_URL}/standard_atmo.txt",
+        required_for_validation=False,
+        notes="Optional no-wind standard-atmosphere LM1021 propagation benchmark.",
+    )
+
+
+def _benchmark_atmospheres(workbook: Any) -> tuple[AtmosphereBenchmarkProfile, ...]:
+    profiles: list[AtmosphereBenchmarkProfile] = []
+    if "NASA_Atmosphere_Profile_1" in workbook.sheetnames:
+        profiles.append(
+            _tabular_benchmark_profile(
+                workbook["NASA_Atmosphere_Profile_1"],
+                profile_id="nasa_profile_1",
+                display_name="Profile 1 · NASA realistic atmosphere",
+                required_for_validation=True,
+                default_source_url=f"{NASA_PROFILE_BASE_URL}/atmospheric_profile_1.txt",
+            )
+        )
+    if "NASA_Atmosphere_Profile_2" in workbook.sheetnames:
+        profiles.append(
+            _tabular_benchmark_profile(
+                workbook["NASA_Atmosphere_Profile_2"],
+                profile_id="nasa_profile_2",
+                display_name="Profile 2 · NASA realistic atmosphere",
+                required_for_validation=False,
+                default_source_url=f"{NASA_PROFILE_BASE_URL}/atmospheric_profile_2.txt",
+            )
+        )
+    if "NASA_Standard_Atmosphere" in workbook.sheetnames:
+        profiles.append(_standard_benchmark_profile(workbook["NASA_Standard_Atmosphere"]))
+    return tuple(profiles)
+
+
 def load_aircraft_definition_workbook(
     source: str | Path | BinaryIO | bytes,
 ) -> AircraftDefinition:
@@ -550,6 +745,7 @@ def load_aircraft_definition_workbook(
         phase_timing=_phase_timing(workbook),
         performance_map=_performance_points(workbook),
         nearfield_samples=_nearfield_samples(workbook),
+        benchmark_atmospheres=_benchmark_atmospheres(workbook),
         workbook_checksum=hashlib.sha256(payload).hexdigest(),
     )
 
@@ -699,6 +895,37 @@ def export_aircraft_definition_workbook(definition: AircraftDefinition) -> bytes
                 sample.notes,
             ]
         )
+
+    profile_sheet_names = {
+        "nasa_profile_1": "NASA_Atmosphere_Profile_1",
+        "nasa_profile_2": "NASA_Atmosphere_Profile_2",
+        "nasa_standard": "NASA_Standard_Atmosphere",
+    }
+    atmosphere_headers = [
+        "Altitude (m)",
+        "Temperature (K)",
+        "X-wind (m/s)",
+        "Y-wind (m/s)",
+        "RH (%)",
+        "Pressure (Pa)",
+        "Source",
+    ]
+    for profile in definition.benchmark_atmospheres:
+        profile_sheet_name = profile_sheet_names.get(profile.profile_id)
+        if profile_sheet_name is None:
+            continue
+        atmosphere = workbook.create_sheet(profile_sheet_name)
+        atmosphere.append(atmosphere_headers)
+        for values in zip(
+            profile.altitude_m,
+            profile.temperature_k,
+            profile.zonal_wind_mps,
+            profile.meridional_wind_mps,
+            profile.humidity_fraction,
+            profile.pressure_pa,
+            strict=True,
+        ):
+            atmosphere.append([*values[:4], values[4] * 100.0, values[5], profile.source_url])
 
     header_fill = PatternFill("solid", fgColor="0F6173")
     for sheet in workbook.worksheets[1:]:

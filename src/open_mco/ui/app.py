@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -15,6 +16,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from open_mco.aircraft import (
     AircraftDefinition,
@@ -30,6 +32,16 @@ from open_mco.mission_analysis import (
     planned_scene_atmospheres,
 )
 from open_mco.models import Route
+from open_mco.physics import (
+    ExternalRouteSolver,
+    PhysicalRouteAnalysis,
+    build_physical_route_request,
+    evidence_zip,
+    footprint_geojson,
+    load_physical_route_analysis,
+    request_checksum,
+    surface_sample_rows,
+)
 from open_mco.route import (
     AUTOMATIC_WEATHER_POLICY_VERSION,
     AUTOMATIC_WEATHER_SAMPLE_SPACING_M,
@@ -58,6 +70,8 @@ OPENSKY_LOOKBACK_DAYS = 7
 ANALYSIS_CACHE_SCHEMA = "real-spacetime-noaa-3dep-v2-sparse-preview"
 AIRCRAFT_STORE = AircraftStore(PROJECT_ROOT / "data/local/aircraft")
 WORKSPACE_MISSION_IDS = ("dfw_jfk", "lax_jfk")
+FAA_NPRM_RESEARCH_LIMIT_PSF = 0.11
+PASCALS_PER_PSF = 47.88025898033584
 
 _FragmentFunc = TypeVar("_FragmentFunc", bound=Callable[..., Any])
 
@@ -391,7 +405,7 @@ h1,h2,h3,h4,p,li { color:var(--ink); }
 st.markdown(
     """
 <div class="brand-row"><div class="brand"><span class="brand-mark">M</span>MachLane</div><div class="run-state">REAL MISSION INPUTS</div></div>
-<div class="notice"><b>Research prototype — not FAA approved.</b> Real route, atmosphere, and available terrain are loaded below. Surface overpressure and sonic-boom compliance are not calculated.</div>
+<div class="notice"><b>Research prototype — not FAA approved.</b> Surface overpressure appears only from a checksum-matched external physical solver result. Ambient weather alone never produces a compliance determination.</div>
 """,
     unsafe_allow_html=True,
 )
@@ -485,7 +499,7 @@ credentials_configured = bool(
 )
 can_run = cached_route is not None or credentials_configured
 with control_action:
-    run_analysis = st.button("Run real analysis", disabled=not can_run, width="stretch")
+    run_analysis = st.button("Run analysis", disabled=not can_run, width="stretch")
 
 if cached_route is not None:
     source = cached_route.source
@@ -512,7 +526,7 @@ if run_analysis:
 route_json = st.session_state.get(route_state_key)
 if not isinstance(route_json, str):
     st.info(
-        "The OpenSky route is ready. Click **Run real analysis** when you want MachLane to load and match NOAA weather and available 3DEP terrain."
+        "The OpenSky route is ready. Click **Run analysis** to load NOAA weather, available 3DEP terrain, and—when registered—the physical propagation wrapper."
     )
     st.stop()
 
@@ -560,17 +574,36 @@ terrain_loaded = sum(result.status == "LOADED" for result in analysis.terrain_re
 terrain_unavailable = sum(result.status == "UNAVAILABLE" for result in analysis.terrain_regions)
 
 phase_progress: dict[int, float] = {}
-non_approach = [
-    point for point in selected_aircraft.phase_profile if point.phase.lower() != "approach"
+cruise_profile_indices = [
+    index
+    for index, point in enumerate(selected_aircraft.phase_profile)
+    if "cruise" in point.phase.lower()
 ]
-for index, point in enumerate(non_approach):
-    if "cruise" in point.phase.lower():
+approach_profile_indices = [
+    index
+    for index, point in enumerate(selected_aircraft.phase_profile)
+    if "approach" in point.phase.lower()
+]
+if not cruise_profile_indices or not approach_profile_indices:
+    st.error("Aircraft profile requires explicit cruise and approach points.")
+    st.stop()
+cruise_profile_index = cruise_profile_indices[-1]
+approach_profile_index = approach_profile_indices[-1]
+if approach_profile_index <= cruise_profile_index:
+    st.error("Aircraft approach point must follow its cruise point.")
+    st.stop()
+for index, point in enumerate(selected_aircraft.phase_profile):
+    if index < cruise_profile_index:
+        phase_progress[point.sequence] = index / max(1, cruise_profile_index) * 0.38
+    elif index == cruise_profile_index:
         phase_progress[point.sequence] = 0.5
+    elif index < approach_profile_index:
+        phase_progress[point.sequence] = 0.62 + (
+            (index - cruise_profile_index)
+            / max(1, approach_profile_index - cruise_profile_index)
+            * 0.30
+        )
     else:
-        denominator = max(1, len(non_approach) - 1)
-        phase_progress[point.sequence] = min(0.38, index / denominator * 0.38)
-for point in selected_aircraft.phase_profile:
-    if point.phase.lower() == "approach":
         phase_progress[point.sequence] = 0.97
 
 scene_environments: list[SceneEnvironment] = []
@@ -606,28 +639,49 @@ except ValueError as exc:
     st.info("Open Aircraft Specificity, complete the missing phase data, and save the aircraft.")
     st.stop()
 
-climb_phase, cruise_phase, _, approach_phase = preliminary_flight_plan.phases
+climb_phase, cruise_phase, descent_phase, approach_phase = preliminary_flight_plan.phases
 climb_end_progress = climb_phase.distance_miles / route_distance_miles
 cruise_mid_progress = (
     climb_phase.distance_miles + cruise_phase.distance_miles / 2
 ) / route_distance_miles
+cruise_end_progress = (
+    climb_phase.distance_miles + cruise_phase.distance_miles
+) / route_distance_miles
+descent_end_progress = (
+    climb_phase.distance_miles + cruise_phase.distance_miles + descent_phase.distance_miles
+) / route_distance_miles
 approach_mid_progress = 1 - approach_phase.distance_miles / route_distance_miles / 2
-ascent_points = selected_aircraft.phase_profile[:-2]
+ascent_points = selected_aircraft.phase_profile[:cruise_profile_index]
 for index, point in enumerate(ascent_points):
     phase_progress[point.sequence] = climb_end_progress * index / max(1, len(ascent_points) - 1)
-phase_progress[selected_aircraft.phase_profile[-2].sequence] = cruise_mid_progress
-phase_progress[selected_aircraft.phase_profile[-1].sequence] = approach_mid_progress
+cruise_scene = selected_aircraft.phase_profile[cruise_profile_index]
+phase_progress[cruise_scene.sequence] = cruise_mid_progress
+descent_points = selected_aircraft.phase_profile[
+    cruise_profile_index + 1 : approach_profile_index
+]
+for index, point in enumerate(descent_points, start=1):
+    phase_progress[point.sequence] = cruise_end_progress + (
+        descent_end_progress - cruise_end_progress
+    ) * index / (len(descent_points) + 1)
+approach_scene = selected_aircraft.phase_profile[approach_profile_index]
+phase_progress[approach_scene.sequence] = approach_mid_progress
 
 climb_minutes = climb_phase.duration_min
 planned_scene_times: dict[int, datetime] = {}
 for index, point in enumerate(ascent_points):
     elapsed_min = climb_minutes * index / max(1, len(ascent_points) - 1)
     planned_scene_times[point.sequence] = observed_start + timedelta(minutes=elapsed_min)
-cruise_scene = selected_aircraft.phase_profile[-2]
 planned_scene_times[cruise_scene.sequence] = observed_start + timedelta(
     minutes=climb_minutes + preliminary_flight_plan.cruise_time_min / 2
 )
-approach_scene = selected_aircraft.phase_profile[-1]
+for index, point in enumerate(descent_points, start=1):
+    planned_scene_times[point.sequence] = observed_start + timedelta(
+        minutes=(
+            climb_minutes
+            + preliminary_flight_plan.cruise_time_min
+            + descent_phase.duration_min * index / (len(descent_points) + 1)
+        )
+    )
 planned_scene_times[approach_scene.sequence] = observed_start + timedelta(
     minutes=preliminary_flight_plan.airborne_time_min - approach_phase.duration_min / 2
 )
@@ -683,6 +737,42 @@ flight_plan = estimate_flight_plan(
     tuple(planned_environments),
 )
 
+physical_request = build_physical_route_request(
+    aircraft=selected_aircraft,
+    analysis=analysis,
+    flight_plan=flight_plan,
+    boom_limit_psf=FAA_NPRM_RESEARCH_LIMIT_PSF,
+)
+physical_request_checksum = request_checksum(physical_request)
+physical_state_key = (
+    f"physical-result:{mission_id}:{observed_date.isoformat()}:"
+    f"{selected_aircraft.workbook_checksum or selected_aircraft.aircraft_id}"
+)
+physical_result: PhysicalRouteAnalysis | None = None
+saved_physical_result = st.session_state.get(physical_state_key)
+if isinstance(saved_physical_result, str):
+    try:
+        candidate_result = load_physical_route_analysis(saved_physical_result)
+    except (ValueError, OSError):
+        st.session_state.pop(physical_state_key, None)
+    else:
+        if candidate_result.request_checksum == physical_request_checksum:
+            physical_result = candidate_result
+        else:
+            st.session_state.pop(physical_state_key, None)
+
+propagation_command = os.getenv("MACHLANE_PROPAGATION_COMMAND")
+if run_analysis and propagation_command:
+    try:
+        with st.spinner(
+            "Running the registered physical propagation wrapper across route, NOAA, and terrain…"
+        ):
+            physical_result = ExternalRouteSolver(propagation_command).run(physical_request)
+    except (RuntimeError, ValueError, OSError) as exc:
+        st.error(f"Physical propagation failed closed: {exc}")
+    else:
+        st.session_state[physical_state_key] = physical_result.model_dump_json()
+
 st.markdown(
     f'<div class="source-banner"><b>Real inputs loaded.</b> OpenSky {callsign} · NOAA {analysis.noaa_model} matched throughout {observed_start:%H:%M}–{observed_end:%H:%M} UTC · automatic atmospheric regions · available USGS 3DEP terrain previews.</div>',
     unsafe_allow_html=True,
@@ -712,8 +802,19 @@ summary[3].metric(
 )
 summary[4].metric(
     "Surface boom",
-    "NOT CALCULATED",
-    "Near-field + validated propagation required",
+    (
+        "NOT CALCULATED"
+        if physical_result is None
+        else physical_result.baseline.classification.replace("_", " ")
+    ),
+    (
+        "Near-field + validated propagation required"
+        if physical_result is None
+        else (
+            f"{physical_result.baseline.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF:.3f} psf upper · "
+            f"limit {physical_result.boom_limit_pa / PASCALS_PER_PSF:.2f} psf"
+        )
+    ),
     delta_color="off",
 )
 
@@ -743,11 +844,23 @@ plan_summary[3].metric(
     delta_color="off",
 )
 
+physical_corridor_text = (
+    '<span class="pending">NOT CALCULATED</span><br/>Atmospheric regions are not a compliant corridor.'
+    if physical_result is None
+    else (
+        f"{physical_result.baseline.classification.replace('_', ' ')} baseline · "
+        + (
+            "no validated variation available"
+            if physical_result.recommended is None
+            else f"recommended {physical_result.recommended.label}"
+        )
+    )
+)
 st.markdown(
     f"""
 <div class="layer-grid">
   <div class="layer"><b>1 · Planned flight</b><span>{selected_aircraft.value('Aircraft Name') or selected_aircraft.display_name} phase profile applied to the real OpenSky baseline geometry · {flight_plan.block_time_min / 60:.2f} hr estimated block time.</span></div>
-  <div class="layer"><b>2 · Compliant operating corridor</b><span><span class="pending">NOT CALCULATED</span><br/>Atmospheric regions are not a compliant corridor.</span></div>
+  <div class="layer"><b>2 · Physical operating corridor</b><span>{physical_corridor_text}</span></div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -755,15 +868,29 @@ st.markdown(
 
 alert_left, alert_right = st.columns([3, 1], vertical_alignment="center")
 with alert_left:
-    st.warning(
-        "Alert mode: a route variation cannot be recommended yet. Real NOAA and terrain are inputs, but the aircraft near-field signature and validated nonlinear propagation result are missing."
-    )
+    if physical_result is None:
+        st.warning(
+            "Alert mode is locked until a registered physical solver returns uncertainty-bounded primary, secondary-direct, and secondary-indirect surface results."
+        )
+    elif physical_result.baseline.classification == "EXCEEDS_LIMIT":
+        st.error(
+            "Baseline exceeds the research threshold. "
+            + (
+                "No uncertainty-bounded route candidate passed every requested ray family."
+                if physical_result.recommended is None
+                else f"Validated strategic alternative available: {physical_result.recommended.label}."
+            )
+        )
+    elif physical_result.baseline.classification == "WITHIN_LIMIT":
+        st.success("Baseline is within the declared uncertainty-bounded research threshold.")
+    else:
+        st.warning("Physical result is incomplete; no operating recommendation is permitted.")
 with alert_right:
-    st.toggle(
+    show_suggested_variation = st.toggle(
         "Suggested variation",
         value=False,
-        disabled=True,
-        help="Unlocked only after a physical, uncertainty-aware sonic-boom calculation identifies a constraint violation.",
+        disabled=physical_result is None or physical_result.recommended is None,
+        help="Shown only when a validated, uncertainty-bounded physical result contains a compliant alternative.",
     )
 
 atmosphere_layers = [
@@ -854,6 +981,70 @@ label_layer = pdk.Layer(
     get_color=[230, 239, 248, 235],
 )
 
+physical_footprint_layer = None
+suggested_route_layer = None
+baseline_surface_by_segment: dict[str, list[dict[str, Any]]] = {}
+if physical_result is not None:
+    physical_points = []
+    limit_pa = physical_result.boom_limit_pa
+    for sample in physical_result.baseline.surface_samples:
+        peak_psf = sample.peak_positive_overpressure_pa / PASCALS_PER_PSF
+        upper_pa = (
+            sample.peak_positive_overpressure_pa
+            if sample.uncertainty_upper_pa is None
+            else sample.uncertainty_upper_pa
+        )
+        upper_psf = upper_pa / PASCALS_PER_PSF
+        compliant = upper_pa <= limit_pa
+        row = {
+            "position": [
+                display_longitude(sample.longitude, map_longitude),
+                sample.latitude,
+            ],
+            "segment_id": sample.segment_id,
+            "ray_family": sample.ray_family,
+            "peak_psf": peak_psf,
+            "upper_psf": upper_psf,
+            "terrain_ft": sample.terrain_elevation_m * METERS_TO_FEET,
+            "color": [35, 220, 180, 120] if compliant else [255, 71, 102, 145],
+            "edge": [106, 255, 220, 245] if compliant else [255, 173, 187, 255],
+        }
+        physical_points.append(row)
+        baseline_surface_by_segment.setdefault(sample.segment_id, []).append(row)
+    physical_footprint_layer = pdk.Layer(
+        "ScatterplotLayer",
+        physical_points,
+        id="physical-surface-overpressure",
+        get_position="position",
+        get_radius=4_500,
+        radius_units="meters",
+        radius_min_pixels=5,
+        radius_max_pixels=24,
+        get_fill_color="color",
+        get_line_color="edge",
+        line_width_min_pixels=2,
+        stroked=True,
+        pickable=True,
+    )
+    if physical_result.recommended is not None:
+        suggested_route_layer = pdk.Layer(
+            "PathLayer",
+            [
+                {
+                    "path": [
+                        [display_longitude(longitude, map_longitude), latitude]
+                        for latitude, longitude in physical_result.recommended.route_coordinates
+                    ]
+                }
+            ],
+            id="validated-suggested-route",
+            get_path="path",
+            get_color=[45, 240, 207, 245],
+            get_width=5,
+            width_units="pixels",
+            width_min_pixels=4,
+        )
+
 
 @fragment
 def render_workspace() -> None:
@@ -916,7 +1107,7 @@ def render_workspace() -> None:
                 help="Show or hide NOAA-derived atmospheric regions. This does not hide the OpenSky route.",
             )
         st.markdown(
-            '<div class="zone-legend">Yellow = exact real OpenSky baseline. Blue → red = lower → higher flight-level ambient pressure. Translucent interiors preserve map context; bright edges delineate automatic atmospheric regions. These are not boom-safe or boom-unsafe areas.</div>',
+            '<div class="zone-legend">Yellow = exact OpenSky baseline. Blue → red route bands = ambient pressure only. Physical surface samples appear green when their uncertainty upper bound is ≤ 0.11 psf and red when it exceeds 0.11 psf. The cyan path is shown only for a validated suggested variation.</div>',
             unsafe_allow_html=True,
         )
         aircraft_layer = pdk.Layer(
@@ -937,7 +1128,17 @@ def render_workspace() -> None:
             pdk.Deck(
                 layers=[
                     *(atmosphere_layers if show_pressure_zones else []),
+                    *(
+                        [physical_footprint_layer]
+                        if physical_footprint_layer is not None
+                        else []
+                    ),
                     observed_layer,
+                    *(
+                        [suggested_route_layer]
+                        if show_suggested_variation and suggested_route_layer is not None
+                        else []
+                    ),
                     label_layer,
                     aircraft_layer,
                 ],
@@ -949,14 +1150,19 @@ def render_workspace() -> None:
                     pitch=8,
                 ),
                 tooltip={
-                    "html": "<b>{region}</b><br/>Ambient pressure {pressure_inhg} inHg<br/>{boundary_reason}",
+                    "html": "<b>{region}{segment_id}</b><br/>{ray_family}<br/>Ambient {pressure_inhg} inHg<br/>Surface peak {peak_psf} psf<br/>Upper bound {upper_psf} psf<br/>{boundary_reason}",
                     "style": {"backgroundColor": "#0b1420", "color": "#e5eef8"},
                 },
             ),
             height=500,
         )
         st.caption(
-            f"Ambient-pressure scale: {pressure_min * 100 * PASCALS_TO_INHG:.3f}–{pressure_max * 100 * PASCALS_TO_INHG:.3f} inHg · exact retained route polyline · no surface-boom footprint"
+            f"Ambient-pressure scale: {pressure_min * 100 * PASCALS_TO_INHG:.3f}–{pressure_max * 100 * PASCALS_TO_INHG:.3f} inHg · exact retained route polyline · "
+            + (
+                "surface boom not calculated"
+                if physical_result is None
+                else f"physical footprint · {physical_result.solver.name} {physical_result.solver.version}"
+            )
         )
 
     with inspector:
@@ -990,21 +1196,34 @@ def render_workspace() -> None:
             f'<div class="status-card"><div class="label">USGS terrain</div><div class="value">{active_row["terrain"].replace("_", " ")}</div><div class="meta">{active_row["terrain_reason"]}</div></div>',
             unsafe_allow_html=True,
         )
+        active_physical_samples = baseline_surface_by_segment.get(active_row["region"], [])
+        if physical_result is None:
+            boom_card = '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT CALCULATED</span></div><div class="meta">No registered physical result</div></div>'
+        elif not active_physical_samples:
+            boom_card = '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">UNKNOWN</span></div><div class="meta">No complete physical ray sample for this region</div></div>'
+        else:
+            active_upper_psf = max(point["upper_psf"] for point in active_physical_samples)
+            boom_card = (
+                '<div class="status-card"><div class="label">Surface boom upper bound</div>'
+                f'<div class="value">{active_upper_psf:.3f} <span class="unit">PSF</span></div>'
+                f'<div class="meta">Limit {physical_result.boom_limit_pa / PASCALS_PER_PSF:.2f} psf · {physical_result.solver.validation_status}</div></div>'
+            )
         st.markdown(
-            '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">NOT CALCULATED</span></div><div class="meta">No ground waveform or overpressure metric</div></div>',
+            boom_card,
             unsafe_allow_html=True,
         )
 
 
 render_workspace()
 
-flight_tab, regions_tab, atmosphere_tab, terrain_tab, provenance_tab, how_tab, evidence_tab = (
+flight_tab, regions_tab, atmosphere_tab, terrain_tab, boom_tab, provenance_tab, how_tab, evidence_tab = (
     st.tabs(
         [
             "Flight plan",
             "Atmospheric regions",
             "Atmosphere",
             "Terrain",
+            "Sonic boom",
             "Data provenance",
             "How it works",
             "Evidence",
@@ -1206,6 +1425,264 @@ with terrain_tab:
         "3DEP is requested automatically only inside MachLane's conservative U.S.-territory envelope. Oceans and unsupported international terrain stay explicitly unavailable."
     )
 
+with boom_tab:
+    st.markdown("#### Physical sonic-boom analysis")
+    st.caption(
+        "FAA-oriented screening uses the uncertainty upper bound against 0.11 psf and requires primary, secondary-direct, and secondary-indirect surface results. A result is never inferred from ambient pressure alone."
+    )
+    coverage = physical_request["coverage_summary"]
+    coverage_cards = st.columns(4)
+    coverage_cards[0].metric("Route regions", f"{coverage['region_count']}")
+    coverage_cards[1].metric("Near-field matched", f"{coverage['ready']}")
+    coverage_cards[2].metric("Subsonic", f"{coverage['subsonic']}")
+    coverage_cards[3].metric("Missing signature", f"{coverage['missing_nearfield']}")
+    workbook_boom_limit = selected_aircraft.numeric_value("Boom Limit")
+    if workbook_boom_limit is not None and abs(workbook_boom_limit - FAA_NPRM_RESEARCH_LIMIT_PSF) > 1e-9:
+        st.warning(
+            f"Workbook threshold {workbook_boom_limit:.2f} psf is retained as source data but is not used for FAA-oriented screening. This workspace uses the current NPRM research threshold of {FAA_NPRM_RESEARCH_LIMIT_PSF:.2f} psf."
+        )
+
+    request_column, result_column = st.columns(2)
+    with request_column:
+        st.download_button(
+            "Download complete solver request · JSON",
+            json.dumps(physical_request, indent=2, default=str),
+            file_name=f"machlane_{mission_id}_{observed_start:%Y%m%d}_physical_request.json",
+            mime="application/json",
+            width="stretch",
+        )
+        st.caption(
+            f"Request SHA-256 · {physical_request_checksum[:16]}… · includes aircraft, near-field, NOAA columns, terrain, phases, ray requirements, and rerouting search policy."
+        )
+    with result_column:
+        uploaded_physical_result = st.file_uploader(
+            "IMPORT sBOOM / PCBoom WRAPPER RESULT",
+            type=["json"],
+            help="Strict machlane-physical-route-v1 JSON. The request checksum and every waveform metric are revalidated before display.",
+        )
+        if uploaded_physical_result is not None:
+            uploaded_bytes = uploaded_physical_result.getvalue()
+            upload_digest = hashlib.sha256(uploaded_bytes).hexdigest()
+            try:
+                imported_result = load_physical_route_analysis(uploaded_bytes)
+                if imported_result.request_checksum != physical_request_checksum:
+                    raise ValueError("result belongs to a different aircraft, route, weather, or terrain request")
+            except (ValueError, OSError) as exc:
+                st.error(f"Physical result rejected: {exc}")
+            else:
+                if st.session_state.get("physical_upload_digest") != upload_digest:
+                    st.session_state[physical_state_key] = imported_result.model_dump_json()
+                    st.session_state["physical_upload_digest"] = upload_digest
+                    st.rerun()
+        if not propagation_command:
+            st.info(
+                "No physical solver wrapper is registered. Install/request sBOOM or PCBoom, create the documented JSON wrapper, then set MACHLANE_PROPAGATION_COMMAND. No additional Python physics library can replace that validation step."
+            )
+        else:
+            st.success("Registered solver wrapper will run with the main Run analysis action.")
+
+    if physical_result is None:
+        st.error(
+            "GROUND BOOM NOT CALCULATED. The request bundle is complete, but no checksum-matched physical solver output is loaded."
+        )
+    else:
+        baseline = physical_result.baseline
+        result_cards = st.columns(5)
+        result_cards[0].metric("Baseline", baseline.classification.replace("_", " "))
+        result_cards[1].metric(
+            "Nominal maximum",
+            f"{baseline.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf",
+        )
+        result_cards[2].metric(
+            "Uncertainty upper",
+            f"{baseline.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF:.3f} psf",
+        )
+        result_cards[3].metric(
+            "Research threshold", f"{physical_result.boom_limit_pa / PASCALS_PER_PSF:.2f} psf"
+        )
+        result_cards[4].metric("Solver", physical_result.solver.validation_status)
+
+        candidate_frame = pd.DataFrame(
+            [
+                {
+                    "Candidate": candidate.label,
+                    "ID": candidate.candidate_id,
+                    "Classification": candidate.classification,
+                    "Distance (mi)": candidate.distance_m * METERS_TO_MILES,
+                    "Time change (min)": candidate.time_delta_min,
+                    "Maximum offset (nmi)": candidate.maximum_lateral_offset_m / 1852,
+                    "Nominal max (psf)": candidate.maximum_nominal_overpressure_pa / PASCALS_PER_PSF,
+                    "Upper max (psf)": candidate.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF,
+                    "Ray families": ", ".join(candidate.completed_ray_families),
+                }
+                for candidate in physical_result.candidates
+            ]
+        )
+        candidate_id = st.selectbox(
+            "Route candidate",
+            [candidate.candidate_id for candidate in physical_result.candidates],
+            format_func=lambda value: next(
+                candidate.label for candidate in physical_result.candidates if candidate.candidate_id == value
+            ),
+            key="physical_candidate",
+        )
+        selected_candidate = next(
+            candidate for candidate in physical_result.candidates if candidate.candidate_id == candidate_id
+        )
+        physical_profile = sorted(
+            selected_candidate.surface_samples,
+            key=lambda sample: (sample.along_track_m, sample.cross_track_m, sample.ray_family),
+        )
+
+        profile_figure = make_subplots(specs=[[{"secondary_y": True}]])
+        for ray_family, color in (
+            ("PRIMARY", "#30d5ff"),
+            ("SECONDARY_DIRECT", "#ffd447"),
+            ("SECONDARY_INDIRECT", "#ff5b79"),
+        ):
+            family_samples = [sample for sample in physical_profile if sample.ray_family == ray_family]
+            if not family_samples:
+                continue
+            profile_figure.add_trace(
+                go.Scatter(
+                    x=[sample.along_track_m * METERS_TO_MILES for sample in family_samples],
+                    y=[
+                        (sample.uncertainty_upper_pa or sample.peak_positive_overpressure_pa)
+                        / PASCALS_PER_PSF
+                        for sample in family_samples
+                    ],
+                    mode="lines+markers",
+                    name=ray_family.replace("_", " ").title(),
+                    line={"color": color, "width": 2.5},
+                ),
+                secondary_y=False,
+            )
+        terrain_samples = sorted(
+            {sample.along_track_m: sample.terrain_elevation_m for sample in physical_profile}.items()
+        )
+        profile_figure.add_trace(
+            go.Scatter(
+                x=[distance * METERS_TO_MILES for distance, _ in terrain_samples],
+                y=[elevation * METERS_TO_FEET for _, elevation in terrain_samples],
+                mode="lines",
+                name="Terrain",
+                fill="tozeroy",
+                line={"color": "#8fa6b8", "width": 1.5},
+                opacity=0.45,
+            ),
+            secondary_y=True,
+        )
+        profile_figure.add_hline(
+            y=physical_result.boom_limit_pa / PASCALS_PER_PSF,
+            line_color="#ff4466",
+            line_dash="dash",
+            annotation_text="0.11 psf research threshold",
+            secondary_y=False,
+        )
+        profile_figure.update_layout(
+            title="Terrain-intersected surface overpressure along route",
+            template="plotly_dark",
+            height=470,
+            paper_bgcolor="#081524",
+            plot_bgcolor="#081524",
+            hovermode="x unified",
+        )
+        profile_figure.update_xaxes(title_text="Along-track distance (mi)")
+        profile_figure.update_yaxes(title_text="Uncertainty upper overpressure (psf)", secondary_y=False)
+        profile_figure.update_yaxes(title_text="Terrain elevation (ft)", secondary_y=True)
+        st.plotly_chart(profile_figure, width="stretch")
+
+        waveform_options = {
+            f"{sample.segment_id} · {sample.ray_family} · {sample.cross_track_m / 1852:+.1f} nmi": sample
+            for sample in physical_profile
+        }
+        waveform_label = st.selectbox("Ground waveform", list(waveform_options), key="ground_waveform")
+        waveform = waveform_options[waveform_label]
+        waveform_figure = go.Figure(
+            go.Scatter(
+                x=[value * 1_000 for value in waveform.time_s],
+                y=[value / PASCALS_PER_PSF for value in waveform.overpressure_pa],
+                mode="lines",
+                line={"color": "#30d5ff", "width": 2.5},
+            )
+        )
+        waveform_figure.add_hline(y=0, line_color="#8fa6b8")
+        waveform_figure.update_layout(
+            title=f"Ground waveform · {waveform.segment_id} · {waveform.ray_family.replace('_', ' ').title()}",
+            xaxis_title="Time (ms)",
+            yaxis_title="Surface overpressure (psf)",
+            template="plotly_dark",
+            height=390,
+            paper_bgcolor="#081524",
+            plot_bgcolor="#081524",
+        )
+        st.plotly_chart(waveform_figure, width="stretch")
+
+        if len(physical_result.candidates) > 1:
+            trade_figure = go.Figure(
+                go.Scatter(
+                    x=candidate_frame["Time change (min)"],
+                    y=candidate_frame["Upper max (psf)"],
+                    text=candidate_frame["Candidate"],
+                    mode="markers+text",
+                    textposition="top center",
+                    marker={
+                        "size": [12 + value * 1.5 for value in candidate_frame["Maximum offset (nmi)"]],
+                        "color": [
+                            "#2df0cf" if value == "WITHIN_LIMIT" else "#ff5b79"
+                            for value in candidate_frame["Classification"]
+                        ],
+                    },
+                )
+            )
+            trade_figure.add_hline(
+                y=physical_result.boom_limit_pa / PASCALS_PER_PSF,
+                line_color="#ff4466",
+                line_dash="dash",
+            )
+            trade_figure.update_layout(
+                title="Strategic alternatives · time versus uncertainty-bounded boom",
+                xaxis_title="Flight-time change (min)",
+                yaxis_title="Maximum surface overpressure (psf)",
+                template="plotly_dark",
+                height=390,
+                paper_bgcolor="#081524",
+                plot_bgcolor="#081524",
+            )
+            st.plotly_chart(trade_figure, width="stretch")
+
+        st.dataframe(candidate_frame, hide_index=True, width="stretch")
+        flattened_samples = pd.DataFrame(surface_sample_rows(physical_result))
+        download_columns = st.columns(4)
+        download_columns[0].download_button(
+            "Surface samples · CSV",
+            flattened_samples.to_csv(index=False),
+            file_name=f"{physical_result.run_id}_surface_samples.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+        download_columns[1].download_button(
+            "Footprint · GeoJSON",
+            json.dumps(footprint_geojson(physical_result), indent=2),
+            file_name=f"{physical_result.run_id}_footprint.geojson",
+            mime="application/geo+json",
+            width="stretch",
+        )
+        download_columns[2].download_button(
+            "Full result · JSON",
+            physical_result.model_dump_json(indent=2),
+            file_name=f"{physical_result.run_id}_physical_result.json",
+            mime="application/json",
+            width="stretch",
+        )
+        download_columns[3].download_button(
+            "Evidence package · ZIP",
+            evidence_zip(physical_result, physical_request),
+            file_name=f"{physical_result.run_id}_evidence.zip",
+            mime="application/zip",
+            width="stretch",
+        )
+
 with provenance_tab:
     st.markdown("#### Real input lineage")
     st.dataframe(
@@ -1237,15 +1714,29 @@ with provenance_tab:
                 },
                 {
                     "Input": "Aircraft near-field signature",
-                    "Source": "Not supplied",
+                    "Source": (
+                        selected_aircraft.value("Nearfield Signature File") or "Not supplied"
+                    ),
                     "Time": "—",
-                    "State": "MISSING",
+                    "State": (
+                        f"LOADED · {len(selected_aircraft.nearfield_samples):,} SAMPLES"
+                        if selected_aircraft.nearfield_ready
+                        else "MISSING"
+                    ),
                 },
                 {
                     "Input": "Physical propagation",
-                    "Source": "Not connected",
+                    "Source": (
+                        "Not connected"
+                        if physical_result is None
+                        else f"{physical_result.solver.name} {physical_result.solver.version}"
+                    ),
                     "Time": "—",
-                    "State": "NOT CALCULATED",
+                    "State": (
+                        "NOT CALCULATED"
+                        if physical_result is None
+                        else f"{physical_result.solver.validation_status} · {physical_result.baseline.classification}"
+                    ),
                 },
             ]
         ),
@@ -1289,11 +1780,13 @@ with how_tab:
 6. Requests USGS 3DEP terrain where U.S. coverage may exist and records every unavailable region.
 7. Applies the editable NASA STCA Mach/altitude scene profile and matches NOAA to each scene.
 8. Calculates a research travel-time estimate from local speed of sound and route-aligned wind.
-9. Stops before boom propagation because no reviewed near-field signature and validated nonlinear engine are connected.
+9. Builds a checksum-bound physical request containing aircraft near-field data, NOAA columns, 3DEP terrain, flight state, all three ray families, and strategic route/time/altitude candidates.
+10. Runs a registered sBOOM/PCBoom wrapper or imports its strict result; otherwise stops without inventing a footprint.
+11. Recommends a route only when every requested ray family is complete, the uncertainty upper bound is at or below 0.11 psf, and the solver is marked VALIDATED.
 """
     )
     st.info(
-        "Adaptive refinement based on predicted ground overpressure will replace simple atmospheric thresholds only after a physical propagation engine exists."
+        "NASA Profile 1, Profile 2, and Standard Atmosphere are validation benchmarks. Operational route calculations use position- and time-matched NOAA weather."
     )
 
 with evidence_tab:
@@ -1305,6 +1798,18 @@ with evidence_tab:
         flight_plan,
         tuple(planned_noaa_requests),
     )
+    evidence["physical_solver_request"] = {
+        "checksum": physical_request_checksum,
+        "coverage_summary": physical_request["coverage_summary"],
+        "acceptance": physical_request["acceptance"],
+    }
+    if physical_result is not None:
+        evidence["sonic_boom"] = physical_result.model_dump(mode="json")
+        evidence["compliant_operating_corridor"] = {
+            "status": physical_result.baseline.classification,
+            "recommended_candidate_id": physical_result.recommended_candidate_id,
+            "solver_validation": physical_result.solver.validation_status,
+        }
     st.markdown("#### Evidence-ready real inputs")
     st.dataframe(
         pd.DataFrame(
@@ -1320,8 +1825,22 @@ with evidence_tab:
                     "Outcome": "Planned route",
                     "Status": "OPEN SKY BASELINE · AIRCRAFT 1 PHASE ESTIMATE",
                 },
-                {"Outcome": "Compliant operating corridor", "Status": "NOT CALCULATED"},
-                {"Outcome": "Ground waveform / overpressure", "Status": "NOT CALCULATED"},
+                {
+                    "Outcome": "Physical operating corridor",
+                    "Status": (
+                        "NOT CALCULATED"
+                        if physical_result is None
+                        else physical_result.baseline.classification
+                    ),
+                },
+                {
+                    "Outcome": "Ground waveform / overpressure",
+                    "Status": (
+                        "NOT CALCULATED"
+                        if physical_result is None
+                        else f"{len(surface_sample_rows(physical_result)):,} SAMPLES · {physical_result.solver.validation_status}"
+                    ),
+                },
             ]
         ),
         hide_index=True,

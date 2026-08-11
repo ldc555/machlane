@@ -17,6 +17,8 @@ from open_mco.route import route_from_waypoints
 from open_mco.terrain import FlatTerrainProvider
 from open_mco.validation import SU2NearFieldAdapter
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _write_signature(path: Path) -> Path:
     path.write_text(
@@ -166,6 +168,54 @@ def test_readiness_reports_all_blockers_without_network(
         check for check in report_with_signature.checks if check.key == "near_field_signature"
     )
     assert signature_check.status.value == "READY"
+
+
+def test_readiness_recognizes_embedded_lm1021_inputs(tmp_path: Path) -> None:
+    source = PROJECT_ROOT / "aircraft_database/Aircraft_One/Aircraft_One_Template.xlsx"
+    workbook = load_workbook(source)
+    nearfield = workbook["Nearfield_Signatures"]
+    for x, pressure in ((0, -0.1), (1, 0.2), (2, 0.0)):
+        nearfield.append(
+            [
+                "LM1021_TEST",
+                x,
+                pressure,
+                730.3,
+                0,
+                1.6,
+                55_000,
+                354_000,
+                2.1,
+                "PUBLISHED",
+                "NASA SBPW2",
+                "https://example.test/nearfield",
+                "test fixture",
+                None,
+            ]
+        )
+    atmosphere = workbook.create_sheet("NASA_Atmosphere_Profile_1")
+    atmosphere.append(
+        [
+            "Altitude (m)",
+            "Temperature (K)",
+            "X-wind (m/s)",
+            "Y-wind (m/s)",
+            "RH (%)",
+            "Pressure (Pa)",
+            "Source",
+        ]
+    )
+    atmosphere.append([200, 267, -3, 1, 90, 98_000, "https://example.test/profile"])
+    atmosphere.append([16_000, 220, 20, -10, 1, 10_000, "https://example.test/profile"])
+    path = tmp_path / "lm1021.xlsx"
+    workbook.save(path)
+
+    report = assess_boom_readiness(path)
+    status = {check.key: check.status.value for check in report.checks}
+
+    assert status["near_field_signature"] == "READY"
+    assert status["propagation_benchmark_atmospheres"] == "READY"
+    assert status["physical_propagation_engine"] == "NOT_IMPLEMENTED"
 
 
 def test_su2_adapter_stages_checksummed_inputs(tmp_path: Path, monkeypatch) -> None:

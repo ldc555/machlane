@@ -68,6 +68,95 @@ class FlightPlanEstimate(FrozenPlanModel):
     limitations: tuple[str, ...]
 
 
+def planned_state_at_progress(
+    progress: float,
+    aircraft: AircraftDefinition,
+    flight_plan: FlightPlanEstimate,
+) -> dict[str, float | str]:
+    """Interpolate the declared phase envelope along route distance.
+
+    This is a deterministic scheduling transform, not a flight-dynamics or performance solver.
+    Keeping it in the aircraft domain lets the UI and external propagation request use the exact
+    same Mach, altitude, phase, and elapsed-time state.
+    """
+
+    fraction = min(1.0, max(0.0, progress))
+    if len(flight_plan.phases) != 4:
+        raise ValueError("continuous state requires climb, cruise, descent, and approach")
+    climb, cruise, descent, approach = flight_plan.phases
+    total_distance = sum(phase.distance_miles for phase in flight_plan.phases)
+    if total_distance <= 0:
+        raise ValueError("flight-plan phase distance must be positive")
+    climb_end = climb.distance_miles / total_distance
+    cruise_end = climb_end + cruise.distance_miles / total_distance
+    descent_end = cruise_end + descent.distance_miles / total_distance
+    cruise_indices = [
+        index for index, point in enumerate(aircraft.phase_profile) if "cruise" in point.phase.lower()
+    ]
+    approach_indices = [
+        index for index, point in enumerate(aircraft.phase_profile) if "approach" in point.phase.lower()
+    ]
+    if not cruise_indices or not approach_indices:
+        raise ValueError("aircraft profile requires explicit cruise and approach points")
+    cruise_index = cruise_indices[-1]
+    approach_index = approach_indices[-1]
+    if approach_index <= cruise_index:
+        raise ValueError("aircraft approach point must follow its cruise point")
+
+    def blend(start: float, end: float, amount: float) -> float:
+        return start + (end - start) * min(1.0, max(0.0, amount))
+
+    if fraction <= climb_end:
+        climb_points = aircraft.phase_profile[: cruise_index + 1]
+        if len(climb_points) < 2:
+            raise ValueError("aircraft profile requires at least two climb points")
+        scaled = fraction / max(climb_end, 1e-9) * (len(climb_points) - 1)
+        left_index = min(len(climb_points) - 2, math.floor(scaled))
+        local = scaled - left_index
+        left = climb_points[left_index]
+        right = climb_points[left_index + 1]
+        phase = left.phase if fraction == 0 else right.phase
+        altitude_ft = blend(left.altitude_ft, right.altitude_ft, local)
+        mach = blend(left.mach, right.mach, local)
+        elapsed_min = climb.duration_min * fraction / max(climb_end, 1e-9)
+    elif fraction <= cruise_end:
+        local = (fraction - climb_end) / max(cruise_end - climb_end, 1e-9)
+        phase = cruise.phase
+        altitude_ft = cruise.start_altitude_ft
+        mach = cruise.start_mach
+        elapsed_min = climb.duration_min + cruise.duration_min * local
+    elif fraction <= descent_end:
+        local = (fraction - cruise_end) / max(descent_end - cruise_end, 1e-9)
+        descent_points = aircraft.phase_profile[cruise_index : approach_index + 1]
+        scaled = local * (len(descent_points) - 1)
+        left_index = min(len(descent_points) - 2, math.floor(scaled))
+        point_fraction = scaled - left_index
+        left = descent_points[left_index]
+        right = descent_points[left_index + 1]
+        phase = descent.phase if local == 0 else right.phase
+        altitude_ft = blend(left.altitude_ft, right.altitude_ft, point_fraction)
+        mach = blend(left.mach, right.mach, point_fraction)
+        elapsed_min = climb.duration_min + cruise.duration_min + descent.duration_min * local
+    else:
+        local = (fraction - descent_end) / max(1.0 - descent_end, 1e-9)
+        phase = approach.phase
+        altitude_ft = blend(approach.start_altitude_ft, approach.end_altitude_ft, local)
+        mach = blend(approach.start_mach, approach.end_mach, local)
+        elapsed_min = (
+            climb.duration_min
+            + cruise.duration_min
+            + descent.duration_min
+            + approach.duration_min * local
+        )
+
+    return {
+        "phase": phase,
+        "altitude_ft": altitude_ft,
+        "mach": mach,
+        "elapsed_min": elapsed_min,
+    }
+
+
 def speed_of_sound_knots(temperature_f: float) -> float:
     temperature_k = (temperature_f - 32.0) * 5.0 / 9.0 + 273.15
     if temperature_k <= 0:
@@ -117,10 +206,22 @@ def estimate_flight_plan(
     ):
         raise ValueError("climb, descent, and approach durations must be populated")
 
-    climb_scenes = scenes[:-2]
-    cruise_scene = scenes[-2]
-    approach_scene = scenes[-1]
-    descent_scenes = tuple(reversed(scenes[1:-1]))
+    cruise_indices = [
+        index for index, scene in enumerate(scenes) if "cruise" in scene.phase.lower()
+    ]
+    approach_indices = [
+        index for index, scene in enumerate(scenes) if "approach" in scene.phase.lower()
+    ]
+    if not cruise_indices or not approach_indices:
+        raise ValueError("aircraft profile requires explicit cruise and approach points")
+    cruise_index = cruise_indices[-1]
+    approach_index = approach_indices[-1]
+    if approach_index <= cruise_index:
+        raise ValueError("aircraft approach point must follow its cruise point")
+    climb_scenes = scenes[: cruise_index + 1]
+    cruise_scene = scenes[cruise_index]
+    approach_scene = scenes[approach_index]
+    descent_scenes = scenes[cruise_index:approach_index]
     climb_minutes = float(timing["climb_acceleration"].duration_min or 0)
     descent_minutes = float(timing["descent"].duration_min or 0)
     approach_minutes = float(timing["approach"].duration_min or 0)
@@ -190,7 +291,7 @@ def estimate_flight_plan(
         limitations=(
             "Research trajectory estimate; not certified aircraft performance.",
             "The descent duration is an editable NASA N+2 proxy, not STCA-specific validation data.",
-            "Mach 1.4 over DFW-JFK is a research scenario, not operational or regulatory approval.",
+            f"Mach {cruise_scene.mach:.2f} cruise is a research scenario, not operational or regulatory approval.",
             "No sonic-boom footprint, compliant corridor, or route variation is calculated.",
         ),
     )

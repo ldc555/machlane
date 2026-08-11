@@ -10,6 +10,7 @@ from .flight_plan import (
     SceneEnvironment,
     SceneState,
     estimate_flight_plan,
+    planned_state_at_progress,
     speed_of_sound_knots,
 )
 from .loader import AircraftWorkbookError, load_aircraft_workbook
@@ -17,6 +18,7 @@ from .specification import (
     AircraftDefinition,
     AircraftField,
     AircraftStore,
+    AtmosphereBenchmarkProfile,
     NearFieldSample,
     PerformancePoint,
     PhasePoint,
@@ -28,6 +30,7 @@ __all__ = [
     "AircraftDefinition",
     "AircraftField",
     "AircraftStore",
+    "AtmosphereBenchmarkProfile",
     "AircraftWorkbookError",
     "FlightPhaseEstimate",
     "FlightPlanEstimate",
@@ -42,5 +45,6 @@ __all__ = [
     "load_aircraft_definition_workbook",
     "load_aircraft_workbook",
     "nasa_stca_aircraft_1",
+    "planned_state_at_progress",
     "speed_of_sound_knots",
 ]

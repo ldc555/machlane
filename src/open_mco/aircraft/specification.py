@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 NASA_STCA_2020_URL = "https://ntrs.nasa.gov/api/citations/20200000513/downloads/20200000513.pdf"
 NASA_AURALIZATION_2020_URL = (
@@ -107,6 +107,45 @@ class NearFieldSample(EditableModel):
     notes: str | None = None
 
 
+class AtmosphereBenchmarkProfile(EditableModel):
+    """One immutable NASA propagation-validation atmosphere carried by the workbook."""
+
+    profile_id: str
+    display_name: str
+    altitude_m: tuple[float, ...]
+    temperature_k: tuple[float, ...]
+    pressure_pa: tuple[float, ...]
+    zonal_wind_mps: tuple[float, ...]
+    meridional_wind_mps: tuple[float, ...]
+    humidity_fraction: tuple[float, ...]
+    source_name: str
+    source_url: str
+    required_for_validation: bool = False
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def validate_column(self) -> AtmosphereBenchmarkProfile:
+        lengths = {
+            len(self.altitude_m),
+            len(self.temperature_k),
+            len(self.pressure_pa),
+            len(self.zonal_wind_mps),
+            len(self.meridional_wind_mps),
+            len(self.humidity_fraction),
+        }
+        if lengths != {len(self.altitude_m)} or len(self.altitude_m) < 2:
+            raise ValueError("benchmark atmosphere arrays must have equal lengths and two samples")
+        if any(b <= a for a, b in zip(self.altitude_m, self.altitude_m[1:], strict=False)):
+            raise ValueError("benchmark atmosphere altitude must be strictly increasing")
+        if any(value <= 0 for value in self.temperature_k):
+            raise ValueError("benchmark atmosphere temperature must be positive")
+        if any(value <= 0 for value in self.pressure_pa):
+            raise ValueError("benchmark atmosphere pressure must be positive")
+        if any(not 0 <= value <= 1 for value in self.humidity_fraction):
+            raise ValueError("benchmark atmosphere humidity must be between zero and one")
+        return self
+
+
 class AircraftDefinition(EditableModel):
     schema_version: str = "machlane-aircraft-v1"
     aircraft_id: str
@@ -118,6 +157,7 @@ class AircraftDefinition(EditableModel):
     phase_timing: tuple[PhaseTiming, ...]
     performance_map: tuple[PerformancePoint, ...] = ()
     nearfield_samples: tuple[NearFieldSample, ...] = ()
+    benchmark_atmospheres: tuple[AtmosphereBenchmarkProfile, ...] = ()
     workbook_checksum: str | None = None
 
     @field_validator("aircraft_id")

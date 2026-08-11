@@ -133,7 +133,7 @@ Follow these steps:
 7. Click **Save aircraft & open routes**.
 8. Select **DFW → JFK** or **LAX → JFK** under **Mission**.
 9. Select the OpenSky search-ending date. Start with the latest available date.
-10. Click **Run real analysis**.
+10. Click **Run analysis**.
 11. Let the analysis finish without closing the Terminal or browser. MachLane loads the real
     OpenSky track, matches NOAA weather across the flight, checks available 3DEP terrain, and forms
     automatic atmospheric regions.
@@ -147,7 +147,7 @@ and terrain are loaded separately.
 The Boom XB-1 workbook uses the same drag-and-drop process once it is complete. MachLane will save
 an incomplete workbook, but it will not invent a phase profile or start route modeling from one.
 
-## Why the sonic boom is still locked
+## Physical sonic-boom calculation
 
 Real weather and terrain are necessary but insufficient. A physical result still requires:
 
@@ -157,7 +157,29 @@ Real weather and terrain are necessary but insufficient. A physical result still
 - ground waveform and overpressure metrics;
 - uncertainty analysis and comparison with PCBoom and flight measurements.
 
-Until those inputs exist, the UI reports **Surface boom: not calculated**.
+LM1021 now supplies the NASA SBPW2 near-field signature and three atmospheric validation
+benchmarks. Those inputs validate a propagation implementation; NOAA remains the operational
+atmosphere along a real route.
+
+NASA sBOOM and PCBoom are separately distributed engineering tools, not ordinary Python packages.
+MachLane therefore does not bundle or imitate them. Register a reviewed local wrapper that accepts
+the MachLane JSON contract:
+
+```bash
+export MACHLANE_PROPAGATION_COMMAND="/absolute/path/to/your/sboom-or-pcboom-wrapper"
+streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 8501
+```
+
+The wrapper receives `--input request.json --output result.json`. The output must satisfy
+`machlane-physical-route-v1`; MachLane verifies its request checksum, waveforms, uncertainty bound,
+three ray families, solver version, validation status, and classification before showing a
+footprint or suggested route. Without a registered wrapper, open **Sonic boom** and download the
+complete solver request for offline execution. The result can then be imported in the same tab.
+
+The current FAA NPRM value of 0.11 psf is treated as a research screening threshold, not a final
+approval. A route is never recommended from nominal overpressure alone: all three requested ray
+families must complete, the uncertainty upper bound must remain within the threshold, and the
+solver must be marked `VALIDATED`.
 
 ## Restart later
 
@@ -182,7 +204,8 @@ credentials, and generated evidence remain local and are git-ignored.
 
 For the detailed physics boundary, see [Sonic Boom Pipeline](docs/SONIC_BOOM_PIPELINE.md),
 [Validation Plan](docs/validation_plan.md), and
-[Assumptions and Limitations](docs/assumptions_and_limitations.md).
+[Assumptions and Limitations](docs/assumptions_and_limitations.md). The complete implementation
+brief is in [Physical Boom and Rerouting Implementation Prompt](docs/PHYSICAL_BOOM_AND_REROUTING_IMPLEMENTATION_PROMPT.md).
 
 ---
 
