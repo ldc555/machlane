@@ -438,8 +438,10 @@ def surface_sample_rows(result: PhysicalRouteAnalysis) -> list[dict[str, Any]]:
                     "ground_incidence_deg": sample.ground_incidence_deg,
                     "launch_roll_deg": sample.launch_roll_deg,
                     "reflection_factor": sample.reflection_factor,
-                    "source_altitude_ft": sample.source_altitude_ft,
-                    "candidate_altitude_offset_ft": candidate.altitude_offset_ft,
+                    "source_altitude_ft": getattr(sample, "source_altitude_ft", None),
+                    "candidate_altitude_offset_ft": float(
+                        getattr(candidate, "altitude_offset_ft", 0.0)
+                    ),
                 }
             )
     return rows

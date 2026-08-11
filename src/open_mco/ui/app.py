@@ -71,6 +71,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OPENSKY_CACHE = OpenSkyRouteCache(PROJECT_ROOT / "data/cache/opensky_routes")
 OPENSKY_LOOKBACK_DAYS = 7
 ANALYSIS_CACHE_SCHEMA = "real-spacetime-noaa-3dep-v2-sparse-preview"
+PHYSICAL_RESULT_CACHE_SCHEMA = "physical-route-v3-altitude-sensitivities"
 AIRCRAFT_STORE = AircraftStore(PROJECT_ROOT / "data/local/aircraft")
 WORKSPACE_MISSION_IDS = ("dfw_jfk", "lax_jfk")
 FAA_NPRM_RESEARCH_LIMIT_PSF = 0.11
@@ -105,6 +106,12 @@ def _roll_label(value: float | None) -> str:
     """Format near-field launch roll while remaining compatible with older result files."""
 
     return "roll n/a" if value is None else f"roll {value:+.0f}°"
+
+
+def _candidate_altitude_offset(candidate: Any) -> float:
+    """Read v3 sensitivity metadata without crashing on an older in-memory result."""
+
+    return float(getattr(candidate, "altitude_offset_ft", 0.0))
 
 
 @st.cache_resource(show_spinner=False)
@@ -908,7 +915,7 @@ physical_request = build_physical_route_request(
 )
 physical_request_checksum = request_checksum(physical_request)
 physical_state_key = (
-    f"physical-result:{mission_id}:{observed_date.isoformat()}:"
+    f"physical-result:{PHYSICAL_RESULT_CACHE_SCHEMA}:{mission_id}:{observed_date.isoformat()}:"
     f"{selected_aircraft.workbook_checksum or selected_aircraft.aircraft_id}"
 )
 physical_result: PhysicalRouteAnalysis | None = None
@@ -1032,7 +1039,7 @@ if physical_result is not None:
         candidate
         for candidate in physical_result.candidates
         if candidate.candidate_id != physical_result.baseline_candidate_id
-        and candidate.altitude_offset_ft != 0
+        and _candidate_altitude_offset(candidate) != 0
     ]
     if sensitivity_candidates:
         best_sensitivity = min(
@@ -1068,7 +1075,7 @@ if physical_result is not None:
             else "still above the nominal research threshold"
         )
         mitigation_text = (
-            f'<span class="pending">HEIGHT SENSITIVITY</span><br/>{research_suggestion.altitude_offset_ft:+,.0f} ft lowers the nominal primary-ray maximum to '
+            f'<span class="pending">HEIGHT SENSITIVITY</span><br/>{_candidate_altitude_offset(research_suggestion):+,.0f} ft lowers the nominal primary-ray maximum to '
             f'{research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf ({sensitivity_threshold_text}) with the source signature held fixed.'
         )
     else:
@@ -1130,7 +1137,7 @@ with alert_left:
             )
             st.warning(
                 "The modeled primary ray intersects terrain and its nominal peak exceeds the research "
-                f"threshold. A {research_suggestion.altitude_offset_ft:+,.0f} ft height sensitivity "
+                f"threshold. A {_candidate_altitude_offset(research_suggestion):+,.0f} ft height sensitivity "
                 f"recalculates to {research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal—{sensitivity_threshold_text}—using the same route-time NOAA columns. "
                 "The near-field signature is held fixed, so this is a research mitigation scenario—not a cleared altitude or compliant corridor."
             )
@@ -1157,7 +1164,7 @@ with alert_right:
     if research_suggestion is not None:
         st.metric(
             "Proposed height change",
-            f"{research_suggestion.altitude_offset_ft:+,.0f} ft",
+            f"{_candidate_altitude_offset(research_suggestion):+,.0f} ft",
             f"{research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal",
             delta_color="off",
         )
@@ -1757,7 +1764,7 @@ with boom_tab:
                     / PASCALS_PER_PSF
                 )
                 st.warning(
-                    f"PROPOSED FLIGHT-PATH ADJUSTMENT · Change cruise height by {research_suggestion.altitude_offset_ft:+,.0f} ft. "
+                    f"PROPOSED FLIGHT-PATH ADJUSTMENT · Change cruise height by {_candidate_altitude_offset(research_suggestion):+,.0f} ft. "
                     f"The recalculated primary-ray estimate is {suggested_psf:.3f} psf. "
                     + (
                         "It falls below the research threshold."
@@ -1812,7 +1819,7 @@ with boom_tab:
                     "Distance (mi)": candidate.distance_m * METERS_TO_MILES,
                     "Time change (min)": candidate.time_delta_min,
                     "Maximum offset (nmi)": candidate.maximum_lateral_offset_m / 1852,
-                    "Altitude change (ft)": candidate.altitude_offset_ft,
+                    "Altitude change (ft)": _candidate_altitude_offset(candidate),
                     "Nominal max (psf)": candidate.maximum_nominal_overpressure_pa / PASCALS_PER_PSF,
                     "Upper max (psf)": (
                         candidate.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF
