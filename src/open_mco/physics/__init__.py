@@ -7,6 +7,7 @@ from .engines import (
     MockMCOEngine,
     SonicBoomPropagationEngine,
 )
+from .open_solver import OpenResearchRouteSolver, ResearchSolverUnavailableError
 from .readiness import BoomReadinessReport, ReadinessStatus, assess_boom_readiness
 from .route_analysis import (
     ExternalRouteSolver,
@@ -30,9 +31,11 @@ __all__ = [
     "FastMCOEngine",
     "MockMCOEngine",
     "NearFieldSignatureError",
+    "OpenResearchRouteSolver",
     "PreparedAtmosphericColumn",
     "PhysicalRouteAnalysis",
     "ReadinessStatus",
+    "ResearchSolverUnavailableError",
     "RouteCandidateAnalysis",
     "RouteSolverProvenance",
     "SonicBoomPropagationEngine",

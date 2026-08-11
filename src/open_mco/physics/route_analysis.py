@@ -61,6 +61,10 @@ class SurfaceFootprintSample(FrozenModel):
     ray_arrival_time_s: float | None = Field(default=None, ge=0)
     ground_incidence_deg: float | None = Field(default=None, ge=0, le=90)
     uncertainty_upper_pa: float | None = Field(default=None, ge=0)
+    launch_roll_deg: float | None = Field(default=None, ge=-90, le=90)
+    reflection_factor: float | None = Field(default=None, gt=0)
+    ray_path_horizontal_m: tuple[float, ...] = ()
+    ray_path_altitude_m: tuple[float, ...] = ()
 
     @model_validator(mode="after")
     def validate_waveform(self) -> SurfaceFootprintSample:
@@ -77,6 +81,22 @@ class SurfaceFootprintSample(FrozenModel):
             and self.uncertainty_upper_pa < self.peak_positive_overpressure_pa
         ):
             raise ValueError("uncertainty upper bound cannot be below the nominal peak")
+        if len(self.ray_path_horizontal_m) != len(self.ray_path_altitude_m):
+            raise ValueError("ray-path horizontal and altitude arrays must have equal lengths")
+        if self.ray_path_horizontal_m:
+            if len(self.ray_path_horizontal_m) < 2:
+                raise ValueError("ray path requires at least two points")
+            if any(
+                b < a
+                for a, b in zip(
+                    self.ray_path_horizontal_m,
+                    self.ray_path_horizontal_m[1:],
+                    strict=False,
+                )
+            ):
+                raise ValueError("ray-path horizontal distance must be nondecreasing")
+            if any(value < 0 for value in self.ray_path_horizontal_m):
+                raise ValueError("ray-path horizontal distance cannot be negative")
         return self
 
 
@@ -270,7 +290,9 @@ def build_physical_route_request(
         )
     request = {
         "schema": "machlane-route-solver-request-v1",
-        "created_at": datetime.now(UTC).isoformat(),
+        # Bind the request to the immutable real-route retrieval snapshot.  Using wall-clock time
+        # here made an otherwise identical request checksum change on every Streamlit rerun.
+        "created_at": analysis.observed_route.source.retrieved_at.isoformat(),
         "aircraft": aircraft.model_dump(mode="json"),
         "nearfield_operating_points": [
             {"mach": mach, "altitude_ft": altitude, "weight_lb": weight}
@@ -412,6 +434,8 @@ def surface_sample_rows(result: PhysicalRouteAnalysis) -> list[dict[str, Any]]:
                     "a_weighted_exposure_db": sample.a_weighted_exposure_db,
                     "ray_arrival_time_s": sample.ray_arrival_time_s,
                     "ground_incidence_deg": sample.ground_incidence_deg,
+                    "launch_roll_deg": sample.launch_roll_deg,
+                    "reflection_factor": sample.reflection_factor,
                 }
             )
     return rows

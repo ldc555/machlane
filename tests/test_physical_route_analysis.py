@@ -112,6 +112,14 @@ def test_incomplete_ray_coverage_cannot_be_classified_within_limit() -> None:
         )
 
 
+def test_ray_path_metadata_must_remain_aligned() -> None:
+    payload = _sample("baseline", "PRIMARY", 4.0).model_dump(mode="json")
+    payload["ray_path_horizontal_m"] = [0.0, 1_000.0]
+    payload["ray_path_altitude_m"] = [10_000.0]
+    with pytest.raises(ValidationError, match="ray-path horizontal and altitude"):
+        SurfaceFootprintSample.model_validate(payload)
+
+
 def test_external_solver_uses_checksum_bound_json_contract(tmp_path: Path) -> None:
     wrapper = tmp_path / "wrapper.py"
     result_template = _result({"schema": "placeholder"}).model_dump(mode="json")
@@ -141,3 +149,12 @@ def test_result_json_is_round_trip_stable() -> None:
     assert PhysicalRouteAnalysis.model_validate_json(
         json.dumps(result.model_dump(mode="json"))
     ) == result
+
+
+def test_request_checksum_is_stable_for_identical_snapshot() -> None:
+    request = {
+        "schema": "machlane-route-solver-request-v1",
+        "created_at": "2026-08-03T18:00:00+00:00",
+        "regions": [],
+    }
+    assert request_checksum(request) == request_checksum(dict(request))

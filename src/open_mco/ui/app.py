@@ -34,7 +34,9 @@ from open_mco.mission_analysis import (
 from open_mco.models import Route
 from open_mco.physics import (
     ExternalRouteSolver,
+    OpenResearchRouteSolver,
     PhysicalRouteAnalysis,
+    ResearchSolverUnavailableError,
     build_physical_route_request,
     evidence_zip,
     footprint_geojson,
@@ -97,6 +99,12 @@ def _credential(name: str) -> str | None:
     except (FileNotFoundError, KeyError):
         return None
     return str(secret) if secret else None
+
+
+def _roll_label(value: float | None) -> str:
+    """Format near-field launch roll while remaining compatible with older result files."""
+
+    return "roll n/a" if value is None else f"roll {value:+.0f}°"
 
 
 @st.cache_resource(show_spinner=False)
@@ -490,7 +498,7 @@ h1,h2,h3,h4,p,li { color:var(--ink); }
 st.markdown(
     """
 <div class="brand-row"><div class="brand"><span class="brand-mark">M</span>MachLane</div><div class="run-state">REAL MISSION INPUTS</div></div>
-<div class="notice"><b>Research prototype — not FAA approved.</b> Surface overpressure appears only from a checksum-matched external physical solver result. Ambient weather alone never produces a compliance determination.</div>
+<div class="notice"><b>Research prototype — not FAA approved.</b> The built-in solver reports unvalidated primary-ray estimates; validated external results remain separately identified. Ambient weather alone never produces a surface-boom or compliance determination.</div>
 """,
     unsafe_allow_html=True,
 )
@@ -914,14 +922,20 @@ if isinstance(saved_physical_result, str):
             st.session_state.pop(physical_state_key, None)
 
 propagation_command = os.getenv("MACHLANE_PROPAGATION_COMMAND")
-if run_analysis and propagation_command:
+if run_analysis:
     try:
-        with st.spinner(
-            "Running the registered physical propagation wrapper across route, NOAA, and terrain…"
-        ):
-            physical_result = ExternalRouteSolver(propagation_command).run(physical_request)
-    except (RuntimeError, ValueError, OSError) as exc:
-        st.error(f"Physical propagation failed closed: {exc}")
+        if propagation_command:
+            with st.spinner(
+                "Running the registered physical propagation wrapper across route, NOAA, and terrain…"
+            ):
+                physical_result = ExternalRouteSolver(propagation_command).run(physical_request)
+        else:
+            with st.spinner(
+                "Calculating an unvalidated primary-ray research estimate from LM1021, NOAA, and 3DEP…"
+            ):
+                physical_result = OpenResearchRouteSolver().run(physical_request)
+    except (ResearchSolverUnavailableError, RuntimeError, ValueError, OSError) as exc:
+        st.error(f"Physical propagation stopped: {exc}")
     else:
         st.session_state[physical_state_key] = physical_result.model_dump_json()
 
@@ -957,14 +971,22 @@ summary[4].metric(
     (
         "NOT CALCULATED"
         if physical_result is None
-        else physical_result.baseline.classification.replace("_", " ")
+        else (
+            "RESEARCH ESTIMATE"
+            if physical_result.solver.validation_status != "VALIDATED"
+            else physical_result.baseline.classification.replace("_", " ")
+        )
     ),
     (
         "Near-field + validated propagation required"
         if physical_result is None
         else (
-            f"{physical_result.baseline.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF:.3f} psf upper · "
-            f"limit {physical_result.boom_limit_pa / PASCALS_PER_PSF:.2f} psf"
+            f"{physical_result.baseline.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal · "
+            + (
+                "primary ray only · not uncertainty bounded"
+                if physical_result.solver.validation_status != "VALIDATED"
+                else f"limit {physical_result.boom_limit_pa / PASCALS_PER_PSF:.2f} psf"
+            )
         )
     ),
     delta_color="off",
@@ -1000,11 +1022,18 @@ physical_corridor_text = (
     '<span class="pending">NOT CALCULATED</span><br/>Atmospheric regions are not a compliant corridor.'
     if physical_result is None
     else (
-        f"{physical_result.baseline.classification.replace('_', ' ')} baseline · "
+        '<span class="pending">NOT DETERMINED</span><br/>'
         + (
-            "no validated variation available"
-            if physical_result.recommended is None
-            else f"recommended {physical_result.recommended.label}"
+            "Primary-ray ground waveform calculated, but secondary rays, bounded uncertainty, and validation are incomplete."
+            if physical_result.solver.validation_status != "VALIDATED"
+            else (
+                f"{physical_result.baseline.classification.replace('_', ' ')} baseline · "
+                + (
+                    "no validated variation available"
+                    if physical_result.recommended is None
+                    else f"recommended {physical_result.recommended.label}"
+                )
+            )
         )
     )
 )
@@ -1023,6 +1052,12 @@ with alert_left:
     if physical_result is None:
         st.warning(
             "Alert mode is locked until a registered physical solver returns uncertainty-bounded primary, secondary-direct, and secondary-indirect surface results."
+        )
+    elif physical_result.solver.validation_status != "VALIDATED":
+        st.warning(
+            "Primary-ray surface waveforms were calculated by MachLane's open research solver. "
+            "A route variation is not released because secondary rays, model-form uncertainty, "
+            "alternate LM1021 operating-point signatures, and independent validation are incomplete."
         )
     elif physical_result.baseline.classification == "EXCEEDS_LIMIT":
         st.error(
@@ -1139,6 +1174,7 @@ baseline_surface_by_segment: dict[str, list[dict[str, Any]]] = {}
 if physical_result is not None:
     physical_points = []
     limit_pa = physical_result.boom_limit_pa
+    result_is_validated = physical_result.solver.validation_status == "VALIDATED"
     for sample in physical_result.baseline.surface_samples:
         peak_psf = sample.peak_positive_overpressure_pa / PASCALS_PER_PSF
         upper_pa = (
@@ -1147,7 +1183,7 @@ if physical_result is not None:
             else sample.uncertainty_upper_pa
         )
         upper_psf = upper_pa / PASCALS_PER_PSF
-        compliant = upper_pa <= limit_pa
+        compliant = result_is_validated and upper_pa <= limit_pa
         row = {
             "position": [
                 display_longitude(sample.longitude, map_longitude),
@@ -1158,8 +1194,24 @@ if physical_result is not None:
             "peak_psf": peak_psf,
             "upper_psf": upper_psf,
             "terrain_ft": sample.terrain_elevation_m * METERS_TO_FEET,
-            "color": [35, 220, 180, 120] if compliant else [255, 71, 102, 145],
-            "edge": [106, 255, 220, 245] if compliant else [255, 173, 187, 255],
+            "color": (
+                [35, 220, 180, 120]
+                if compliant
+                else (
+                    [255, 71, 102, 145]
+                    if result_is_validated
+                    else [156, 92, 255, 115]
+                )
+            ),
+            "edge": (
+                [106, 255, 220, 245]
+                if compliant
+                else (
+                    [255, 173, 187, 255]
+                    if result_is_validated
+                    else [205, 176, 255, 245]
+                )
+            ),
         }
         physical_points.append(row)
         baseline_surface_by_segment.setdefault(sample.segment_id, []).append(row)
@@ -1259,7 +1311,7 @@ def render_workspace() -> None:
                 help="Show or hide NOAA-derived atmospheric regions. This does not hide the OpenSky route.",
             )
         st.markdown(
-            '<div class="zone-legend">Yellow = exact OpenSky baseline. Blue → red route bands = ambient pressure only. Physical surface samples appear green when their uncertainty upper bound is ≤ 0.11 psf and red when it exceeds 0.11 psf. The cyan path is shown only for a validated suggested variation.</div>',
+            '<div class="zone-legend">Yellow = exact OpenSky baseline. Blue → red route bands = ambient pressure only. Purple surface points are unvalidated primary-ray research estimates; they are not safe/unsafe classifications. The cyan path appears only for a validated, uncertainty-bounded variation.</div>',
             unsafe_allow_html=True,
         )
         aircraft_layer = pdk.Layer(
@@ -1313,7 +1365,10 @@ def render_workspace() -> None:
             + (
                 "surface boom not calculated"
                 if physical_result is None
-                else f"physical footprint · {physical_result.solver.name} {physical_result.solver.version}"
+                else (
+                    f"primary-ray research footprint · {physical_result.solver.name} "
+                    f"{physical_result.solver.version} · {physical_result.solver.validation_status}"
+                )
             )
         )
 
@@ -1354,11 +1409,11 @@ def render_workspace() -> None:
         elif not active_physical_samples:
             boom_card = '<div class="status-card"><div class="label">Surface boom</div><div class="value"><span class="pending">UNKNOWN</span></div><div class="meta">No complete physical ray sample for this region</div></div>'
         else:
-            active_upper_psf = max(point["upper_psf"] for point in active_physical_samples)
+            active_nominal_psf = max(point["peak_psf"] for point in active_physical_samples)
             boom_card = (
-                '<div class="status-card"><div class="label">Surface boom upper bound</div>'
-                f'<div class="value">{active_upper_psf:.3f} <span class="unit">PSF</span></div>'
-                f'<div class="meta">Limit {physical_result.boom_limit_pa / PASCALS_PER_PSF:.2f} psf · {physical_result.solver.validation_status}</div></div>'
+                '<div class="status-card"><div class="label">Surface boom · nominal</div>'
+                f'<div class="value">{active_nominal_psf:.3f} <span class="unit">PSF</span></div>'
+                f'<div class="meta">PRIMARY ONLY · {physical_result.solver.validation_status} · NOT A COMPLIANCE RESULT</div></div>'
             )
         st.markdown(
             boom_card,
@@ -1580,7 +1635,7 @@ with terrain_tab:
 with boom_tab:
     st.markdown("#### Physical sonic-boom analysis")
     st.caption(
-        "FAA-oriented screening uses the uncertainty upper bound against 0.11 psf and requires primary, secondary-direct, and secondary-indirect surface results. A result is never inferred from ambient pressure alone."
+        "MachLane can calculate an unvalidated primary-ray ground waveform from the LM1021 near-field signature, route-matched NOAA atmosphere, and available 3DEP terrain. FAA-oriented screening still requires bounded uncertainty, primary and secondary rays, and an independently validated method. A result is never inferred from ambient pressure alone."
     )
     coverage = physical_request["coverage_summary"]
     coverage_cards = st.columns(4)
@@ -1628,7 +1683,10 @@ with boom_tab:
                     st.rerun()
         if not propagation_command:
             st.info(
-                "No physical solver wrapper is registered. Install/request sBOOM or PCBoom, create the documented JSON wrapper, then set MACHLANE_PROPAGATION_COMMAND. No additional Python physics library can replace that validation step."
+                "MachLane's built-in open primary-ray research solver runs with **Run analysis**. "
+                "It remains UNVALIDATED and does not calculate secondary rays, bounded uncertainty, "
+                "PLdB, or a compliant corridor. A reviewed sBOOM/PCBoom comparison wrapper can still "
+                "be registered through MACHLANE_PROPAGATION_COMMAND."
             )
         else:
             st.success("Registered solver wrapper will run with the main Run analysis action.")
@@ -1639,15 +1697,29 @@ with boom_tab:
         )
     else:
         baseline = physical_result.baseline
+        result_has_uncertainty = all(
+            sample.uncertainty_upper_pa is not None for sample in baseline.surface_samples
+        )
         result_cards = st.columns(5)
-        result_cards[0].metric("Baseline", baseline.classification.replace("_", " "))
+        result_cards[0].metric(
+            "Baseline",
+            (
+                baseline.classification.replace("_", " ")
+                if physical_result.solver.validation_status == "VALIDATED"
+                else "RESEARCH ONLY"
+            ),
+        )
         result_cards[1].metric(
             "Nominal maximum",
             f"{baseline.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf",
         )
         result_cards[2].metric(
             "Uncertainty upper",
-            f"{baseline.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF:.3f} psf",
+            (
+                f"{baseline.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF:.3f} psf"
+                if result_has_uncertainty
+                else "NOT BOUNDED"
+            ),
         )
         result_cards[3].metric(
             "Research threshold", f"{physical_result.boom_limit_pa / PASCALS_PER_PSF:.2f} psf"
@@ -1664,7 +1736,14 @@ with boom_tab:
                     "Time change (min)": candidate.time_delta_min,
                     "Maximum offset (nmi)": candidate.maximum_lateral_offset_m / 1852,
                     "Nominal max (psf)": candidate.maximum_nominal_overpressure_pa / PASCALS_PER_PSF,
-                    "Upper max (psf)": candidate.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF,
+                    "Upper max (psf)": (
+                        candidate.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF
+                        if all(
+                            sample.uncertainty_upper_pa is not None
+                            for sample in candidate.surface_samples
+                        )
+                        else None
+                    ),
                     "Ray families": ", ".join(candidate.completed_ray_families),
                 }
                 for candidate in physical_result.candidates
@@ -1686,6 +1765,89 @@ with boom_tab:
             key=lambda sample: (sample.along_track_m, sample.cross_track_m, sample.ray_family),
         )
 
+        intersection_figure = go.Figure()
+        roll_values = sorted(
+            {
+                sample.launch_roll_deg
+                for sample in physical_profile
+                if sample.launch_roll_deg is not None
+            }
+        )
+        has_lateral_pattern = len(roll_values) > 1 and any(
+            abs(sample.cross_track_m) > 1.0 for sample in physical_profile
+        )
+        for roll in roll_values:
+            roll_samples = sorted(
+                [sample for sample in physical_profile if sample.launch_roll_deg == roll],
+                key=lambda sample: sample.along_track_m,
+            )
+            intersection_figure.add_trace(
+                go.Scatter(
+                    x=[sample.along_track_m * METERS_TO_MILES for sample in roll_samples],
+                    y=[sample.cross_track_m / 1852 for sample in roll_samples],
+                    mode="lines",
+                    line={"color": "rgba(170,190,215,.24)", "width": 1},
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+        intersection_figure.add_trace(
+            go.Scatter(
+                x=[sample.along_track_m * METERS_TO_MILES for sample in physical_profile],
+                y=[sample.cross_track_m / 1852 for sample in physical_profile],
+                text=[
+                    f"{sample.segment_id}<br>{_roll_label(sample.launch_roll_deg)}<br>"
+                    f"peak {sample.peak_positive_overpressure_pa / PASCALS_PER_PSF:.3f} psf"
+                    for sample in physical_profile
+                ],
+                hovertemplate="%{text}<extra></extra>",
+                mode="markers",
+                name="Primary ground intersection",
+                marker={
+                    "size": 11,
+                    "color": [
+                        sample.peak_positive_overpressure_pa / PASCALS_PER_PSF
+                        for sample in physical_profile
+                    ],
+                    "colorscale": "Turbo",
+                    "showscale": True,
+                    "colorbar": {"title": "Nominal<br>peak psf"},
+                    "line": {"color": "#e9f2ff", "width": 0.8},
+                },
+            )
+        )
+        intersection_figure.add_hline(
+            y=0,
+            line_color="#ffd447",
+            line_width=2,
+            annotation_text="OpenSky route centerline",
+        )
+        intersection_figure.update_layout(
+            title=(
+                "Multi-azimuth primary-ray ground-intersection pattern"
+                if has_lateral_pattern
+                else "Undertrack primary-ray ground-intersection chain"
+            ),
+            xaxis_title="Along-route position (mi)",
+            yaxis_title="Cross-track ground intersection (nmi)",
+            template="plotly_dark",
+            height=470,
+            paper_bgcolor="#081524",
+            plot_bgcolor="#081524",
+            font={"color": "#e9f2ff"},
+            title_font={"color": "#ffffff", "size": 19},
+        )
+        st.plotly_chart(intersection_figure, width="stretch")
+        st.caption(
+            "Each point is a geometrical-acoustics primary-ray intersection from a published, condition-matched LM1021 azimuth signature. "
+            + (
+                "Off-track terrain currently reuses the region's route-aligned 3DEP elevation. "
+                if has_lateral_pattern
+                else "This workbook supplies only the undertrack signature at the matched condition, so MachLane does not invent a lateral boom carpet. "
+            )
+            + "This is an intersection diagnostic, not a validated footprint contour."
+        )
+
         profile_figure = make_subplots(specs=[[{"secondary_y": True}]])
         for ray_family, color in (
             ("PRIMARY", "#30d5ff"),
@@ -1695,13 +1857,26 @@ with boom_tab:
             family_samples = [sample for sample in physical_profile if sample.ray_family == ray_family]
             if not family_samples:
                 continue
+            family_by_distance: dict[float, Any] = {}
+            for sample in family_samples:
+                current = family_by_distance.get(sample.along_track_m)
+                if (
+                    current is None
+                    or sample.peak_positive_overpressure_pa
+                    > current.peak_positive_overpressure_pa
+                ):
+                    family_by_distance[sample.along_track_m] = sample
+            family_envelope = [family_by_distance[key] for key in sorted(family_by_distance)]
             profile_figure.add_trace(
                 go.Scatter(
-                    x=[sample.along_track_m * METERS_TO_MILES for sample in family_samples],
+                    x=[sample.along_track_m * METERS_TO_MILES for sample in family_envelope],
                     y=[
-                        (sample.uncertainty_upper_pa or sample.peak_positive_overpressure_pa)
-                        / PASCALS_PER_PSF
-                        for sample in family_samples
+                        (
+                            sample.uncertainty_upper_pa
+                            if sample.uncertainty_upper_pa is not None
+                            else sample.peak_positive_overpressure_pa
+                        ) / PASCALS_PER_PSF
+                        for sample in family_envelope
                     ],
                     mode="lines+markers",
                     name=ray_family.replace("_", " ").title(),
@@ -1738,37 +1913,140 @@ with boom_tab:
             paper_bgcolor="#081524",
             plot_bgcolor="#081524",
             hovermode="x unified",
+            font={"color": "#e9f2ff"},
+            title_font={"color": "#ffffff", "size": 19},
         )
         profile_figure.update_xaxes(title_text="Along-track distance (mi)")
-        profile_figure.update_yaxes(title_text="Uncertainty upper overpressure (psf)", secondary_y=False)
+        profile_figure.update_yaxes(
+            title_text=(
+                "Uncertainty upper overpressure (psf)"
+                if result_has_uncertainty
+                else "Nominal research overpressure (psf)"
+            ),
+            secondary_y=False,
+        )
         profile_figure.update_yaxes(title_text="Terrain elevation (ft)", secondary_y=True)
         st.plotly_chart(profile_figure, width="stretch")
 
         waveform_options = {
-            f"{sample.segment_id} · {sample.ray_family} · {sample.cross_track_m / 1852:+.1f} nmi": sample
+            f"{sample.segment_id} · {_roll_label(sample.launch_roll_deg)} · {sample.cross_track_m / 1852:+.1f} nmi": sample
             for sample in physical_profile
         }
         waveform_label = st.selectbox("Ground waveform", list(waveform_options), key="ground_waveform")
         waveform = waveform_options[waveform_label]
-        waveform_figure = go.Figure(
+        waveform_figure = go.Figure()
+        reflection_factor = waveform.reflection_factor or 1.0
+        waveform_figure.add_trace(
+            go.Scatter(
+                x=[value * 1_000 for value in waveform.time_s],
+                y=[
+                    value / reflection_factor / PASCALS_PER_PSF
+                    for value in waveform.overpressure_pa
+                ],
+                mode="lines",
+                name="Incident at terrain",
+                line={"color": "#8fb9d9", "width": 1.8, "dash": "dot"},
+            )
+        )
+        waveform_figure.add_trace(
             go.Scatter(
                 x=[value * 1_000 for value in waveform.time_s],
                 y=[value / PASCALS_PER_PSF for value in waveform.overpressure_pa],
                 mode="lines",
-                line={"color": "#30d5ff", "width": 2.5},
+                name=f"Ground pressure · rigid factor {reflection_factor:.1f}",
+                line={"color": "#30d5ff", "width": 2.8},
             )
         )
         waveform_figure.add_hline(y=0, line_color="#8fa6b8")
         waveform_figure.update_layout(
-            title=f"Ground waveform · {waveform.segment_id} · {waveform.ray_family.replace('_', ' ').title()}",
+            title=(
+                "Incident and rigid-ground waveform · "
+                f"{waveform.segment_id} · {_roll_label(waveform.launch_roll_deg)}"
+            ),
             xaxis_title="Time (ms)",
             yaxis_title="Surface overpressure (psf)",
             template="plotly_dark",
             height=390,
             paper_bgcolor="#081524",
             plot_bgcolor="#081524",
+            font={"color": "#e9f2ff"},
+            title_font={"color": "#ffffff", "size": 18},
         )
-        st.plotly_chart(waveform_figure, width="stretch")
+        ray_figure = go.Figure()
+        if waveform.ray_path_horizontal_m and waveform.ray_path_altitude_m:
+            ray_x_nmi = [value / 1852 for value in waveform.ray_path_horizontal_m]
+            ray_y_ft = [value * METERS_TO_FEET for value in waveform.ray_path_altitude_m]
+            ray_figure.add_trace(
+                go.Scatter(
+                    x=ray_x_nmi,
+                    y=ray_y_ft,
+                    mode="lines",
+                    name="Incident primary ray",
+                    line={"color": "#30d5ff", "width": 3},
+                )
+            )
+            ground_ft = waveform.terrain_elevation_m * METERS_TO_FEET
+            receiver_nmi = ray_x_nmi[-1]
+            reflected_horizontal_nmi = max(receiver_nmi * 0.22, 1.0)
+            incidence_deg = waveform.ground_incidence_deg or 0.0
+            reflected_altitude_ft = (
+                reflected_horizontal_nmi
+                * 1852
+                / max(math.tan(math.radians(incidence_deg)), 1e-6)
+                * METERS_TO_FEET
+            )
+            reflected_altitude_ft = min(
+                reflected_altitude_ft,
+                max(ray_y_ft[0] - ground_ft, 1.0),
+            )
+            ray_figure.add_trace(
+                go.Scatter(
+                    x=[receiver_nmi, receiver_nmi + reflected_horizontal_nmi],
+                    y=[ground_ft, ground_ft + reflected_altitude_ft],
+                    mode="lines",
+                    name="Specular reflection geometry",
+                    line={"color": "#ffd447", "width": 2.2, "dash": "dash"},
+                )
+            )
+            ray_figure.add_trace(
+                go.Scatter(
+                    x=[0, receiver_nmi, receiver_nmi + reflected_horizontal_nmi],
+                    y=[ground_ft, ground_ft, ground_ft],
+                    mode="lines",
+                    name="Local 3DEP terrain plane",
+                    fill="tozeroy",
+                    line={"color": "#8fa6b8", "width": 1.5},
+                    opacity=0.5,
+                )
+            )
+            ray_figure.add_trace(
+                go.Scatter(
+                    x=[0, receiver_nmi],
+                    y=[ray_y_ft[0], ground_ft],
+                    mode="markers",
+                    name="Aircraft / receiver",
+                    marker={"size": [11, 12], "color": ["#ffd447", "#ff5b79"]},
+                )
+            )
+        ray_figure.update_layout(
+            title="Ray–terrain intersection and reflection geometry",
+            xaxis_title="Horizontal distance from aircraft (nmi)",
+            yaxis_title="Altitude MSL (ft)",
+            template="plotly_dark",
+            height=430,
+            paper_bgcolor="#081524",
+            plot_bgcolor="#081524",
+            font={"color": "#e9f2ff"},
+            title_font={"color": "#ffffff", "size": 18},
+        )
+        visual_left, visual_right = st.columns(2)
+        with visual_left:
+            st.plotly_chart(ray_figure, width="stretch")
+        with visual_right:
+            st.plotly_chart(waveform_figure, width="stretch")
+        st.caption(
+            "The dashed reflected ray is geometric context for the declared rigid-ground pressure-doubling assumption. MachLane does not yet model frequency-dependent ground impedance, scattering, diffraction, or terrain shadowing."
+        )
 
         if len(physical_result.candidates) > 1:
             trade_figure = go.Figure(

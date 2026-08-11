@@ -1,8 +1,9 @@
 # Physical sonic-boom calculation boundary
 
 MachLane does not convert ambient pressure into boom overpressure and does not use the synthetic
-planner score for engineering decisions. A physical run is allowed only after every boundary below
-has a reviewed input and the propagation engine has passed validation.
+planner score for engineering decisions. The built-in solver produces an `UNVALIDATED` primary-ray
+research estimate only when the near-field, NOAA, and terrain inputs pass strict gates. Validation
+and operational recommendations remain separately locked.
 
 ```text
 aircraft geometry + operating point
@@ -22,10 +23,10 @@ route segment ────────> bearing and WGS-84 position
            SonicBoomCase
                  │
                  ▼
- reviewed nonlinear ray + waveform propagation engine   ← not implemented
+ open nonlinear primary-ray research solver              ← UNVALIDATED
                  │
                  ▼
- receiver waveforms + peak overpressure + loudness + ray family
+ primary receiver waveforms + nominal peak overpressure
                  │
                  ▼
  PCBoom comparison matrix / published cases / flight measurements
@@ -50,6 +51,14 @@ route segment ────────> bearing and WGS-84 position
    version, limitations, and validation status.
 7. `boom-readiness` audits the workbook, performance map, mission settings, signature, data adapters,
    engine, and reference validation. It performs no network, CFD, or PCBoom call.
+8. `OpenResearchRouteSolver` traces a wind-adjusted primary ray through each real NOAA column,
+   marches the waveform with a conservative nonlinear finite-volume step and frequency-dependent
+   absorption, intersects available 3DEP terrain, and returns checksum-bound nominal ground
+   waveforms. It is explicitly `UNVALIDATED` and leaves the classification `UNKNOWN`.
+9. The production UI presents four research diagnostics from the checksum-bound result: a
+   ground-intersection pattern (multi-azimuth only when matched off-axis signatures exist), an along-route overpressure/terrain profile,
+   incident-versus-rigid-ground waveforms, and a ray/terrain cross-section with illustrative
+   specular-reflection geometry. None is labeled as a validated footprint or compliant corridor.
 
 ## Open-source roles and limits
 
@@ -77,9 +86,7 @@ limit. Running the readiness command prints every missing field without stopping
 
 ## Next physical milestone
 
-The next implementation must be based on published equations and canonical cases, reviewed by a
-qualified acoustics/CFD engineer, and compared against PCBoom or another accepted reference. At minimum
-it must cover three-dimensional atmospheric rays, nonlinear distortion, thermoviscous absorption,
-molecular relaxation, geometrical spreading, wind, terrain intersection, ground reflection, primary and
-secondary paths, waveform reconstruction, and the required ground metrics. Until then, the result is
-`NOT_IMPLEMENTED`, never “safe.”
+The primary research path is implemented, but the next milestone remains NASA SBPW2 numerical
+comparison, independent review, secondary-direct and secondary-indirect eigenrays, caustic/diffraction
+treatment, propagation-grade receiver terrain, model-form uncertainty, and reviewed loudness metrics.
+Until those gates pass, the result is `UNVALIDATED`/`UNKNOWN`, never “safe.”

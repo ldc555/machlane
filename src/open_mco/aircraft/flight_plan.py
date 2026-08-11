@@ -292,6 +292,6 @@ def estimate_flight_plan(
             "Research trajectory estimate; not certified aircraft performance.",
             "The descent duration is an editable NASA N+2 proxy, not STCA-specific validation data.",
             f"Mach {cruise_scene.mach:.2f} cruise is a research scenario, not operational or regulatory approval.",
-            "No sonic-boom footprint, compliant corridor, or route variation is calculated.",
+            "The flight-time estimate does not establish a sonic-boom footprint, compliant corridor, or route variation.",
         ),
     )

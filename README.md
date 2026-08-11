@@ -4,9 +4,10 @@ MachLane is an open-source research workspace that combines a real OpenSky fligh
 weather, available USGS terrain, and an uploaded aircraft workbook to build a route-aligned
 high-speed flight analysis.
 
-> **Research prototype — not FAA approved.** MachLane currently estimates route timing and groups
-> atmospheric conditions. It does **not** yet calculate a sonic-boom footprint, surface
-> overpressure, or compliant operating corridor.
+> **Research prototype — not FAA approved.** MachLane calculates an explicitly unvalidated
+> primary-ray surface-waveform estimate when a condition-matched near-field signature is available.
+> It does **not** yet calculate secondary rays, bounded uncertainty, validated loudness, or a
+> compliant operating corridor.
 
 ## What the analysis uses
 
@@ -138,7 +139,8 @@ Follow these steps:
 10. Click **Run analysis**.
 11. Let the analysis finish without closing the Terminal or browser. MachLane loads the real
     OpenSky track, matches NOAA weather across the flight, checks available 3DEP terrain, and forms
-    automatic atmospheric regions.
+    automatic atmospheric regions. With the LM1021 workbook it also runs the open primary-ray
+    research solver over propagation-eligible regions.
 12. Use the aircraft-position slider to inspect phase, Mach, altitude, speed, pressure, temperature,
     wind, and atmospheric region. Use the lower tabs for provenance and exportable evidence.
 
@@ -151,7 +153,23 @@ an incomplete workbook, but it will not invent a phase profile or start route mo
 
 ## Physical sonic-boom calculation
 
-Real weather and terrain are necessary but insufficient. A physical result still requires:
+Real weather and terrain are necessary but insufficient for a compliance result. MachLane's built-in
+open research solver now calculates a nominal primary ground waveform from:
+
+- a condition-matched aircraft near-field pressure signature;
+- the complete route/time-matched NOAA vertical atmosphere available below the aircraft;
+- a stratified, wind-adjusted geometrical-acoustics primary ray;
+- conservative nonlinear waveform steepening based on an augmented-Burgers formulation;
+- classical plus oxygen/nitrogen relaxation absorption;
+- ray-tube/stratification scaling and a declared rigid-ground reflection;
+- available route-aligned USGS 3DEP terrain.
+
+The implementation follows the direction described in NASA's public
+[augmented-Burgers paper](https://ntrs.nasa.gov/citations/20230005332) and uses the public
+[NASA SBPW2 LM1021 inputs](https://lbpw.larc.nasa.gov/sbpw2/propagation/lm1021/). It is not a copy
+of PCBoom or sBOOM and is not yet numerically equivalent to either tool.
+
+A validated result still requires:
 
 - a reviewed aircraft near-field pressure signature or equivalent-area/CFD input;
 - calibrated thrust, drag, fuel-flow, and weight models;
@@ -159,13 +177,13 @@ Real weather and terrain are necessary but insufficient. A physical result still
 - ground waveform and overpressure metrics;
 - uncertainty analysis and comparison with PCBoom and flight measurements.
 
-LM1021 now supplies the NASA SBPW2 near-field signature and three atmospheric validation
-benchmarks. Those inputs validate a propagation implementation; NOAA remains the operational
-atmosphere along a real route.
+LM1021 supplies the NASA SBPW2 near-field signature and three atmospheric benchmark inputs. Those
+files enable validation work; their presence does not validate the solver. NOAA remains the
+operational atmosphere along a real route.
 
 NASA sBOOM and PCBoom are separately distributed engineering tools, not ordinary Python packages.
-MachLane therefore does not bundle or imitate them. Register a reviewed local wrapper that accepts
-the MachLane JSON contract:
+MachLane therefore does not bundle them. Its clean-room solver remains `UNVALIDATED`. A reviewed
+local comparison wrapper can still be registered through the MachLane JSON contract:
 
 ```bash
 export MACHLANE_PROPAGATION_COMMAND="/absolute/path/to/your/sboom-or-pcboom-wrapper"
@@ -175,8 +193,17 @@ streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 85
 The wrapper receives `--input request.json --output result.json`. The output must satisfy
 `machlane-physical-route-v1`; MachLane verifies its request checksum, waveforms, uncertainty bound,
 three ray families, solver version, validation status, and classification before showing a
-footprint or suggested route. Without a registered wrapper, open **Sonic boom** and download the
-complete solver request for offline execution. The result can then be imported in the same tab.
+validated suggestion. Without a registered wrapper, **Run analysis** uses the built-in primary-ray
+research solver and exposes its nominal waveform, surface points, and evidence downloads. Its
+research visualizations include a ground-intersection pattern (multi-azimuth when the workbook
+supplies matched off-axis signatures), an along-route
+overpressure/terrain profile, incident-versus-rigid-ground waveforms, and a ray/terrain cross-section
+with illustrative specular-reflection geometry. The same tab also exports the request for independent
+sBOOM/PCBoom comparison.
+
+These plots are diagnostic views, not validated boom contours. Off-track intersections currently
+reuse the atmospheric region's route-aligned terrain elevation, and the dashed reflected ray shows
+the declared rigid-ground assumption rather than a frequency-dependent ground-interaction solution.
 
 The current FAA NPRM value of 0.11 psf is treated as a research screening threshold, not a final
 approval. A route is never recommended from nominal overpressure alone: all three requested ray
