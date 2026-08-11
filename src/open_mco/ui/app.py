@@ -45,6 +45,7 @@ from open_mco.physics import (
 from open_mco.route import (
     AUTOMATIC_WEATHER_POLICY_VERSION,
     AUTOMATIC_WEATHER_SAMPLE_SPACING_M,
+    OpenSkyObservedFlight,
     OpenSkyRouteCache,
     OpenSkyTrackProvider,
     get_mission,
@@ -147,34 +148,118 @@ def _load_planned_scene_atmospheres(
 
 def _load_or_fetch_route(
     mission_id: str,
-    search_date: date,
+    flight_json: str,
     *,
     force_refresh: bool,
 ) -> Route:
     mission = get_mission(mission_id)
+    flight = OpenSkyObservedFlight.model_validate_json(flight_json)
+    observed_date = flight.first_seen.date()
     if not force_refresh:
         cached = OPENSKY_CACHE.load(
             mission_id,
-            search_date,
+            observed_date,
             origin_icao=mission.origin.icao,
             destination_icao=mission.destination.icao,
         )
-        if cached is not None:
+        if (
+            cached is not None
+            and cached.source is not None
+            and cached.source.flight_id == flight.flight_id
+        ):
             return cached
     provider = OpenSkyTrackProvider(
         network_enabled=True,
         client_id=_credential("OPENSKY_CLIENT_ID"),
         client_secret=_credential("OPENSKY_CLIENT_SECRET"),
     )
-    search_end = datetime.combine(search_date, time.max, tzinfo=UTC)
-    route = provider.recent_route_for_airports(
+    route = provider.route_for_observed_flight(
         mission.origin,
         mission.destination,
-        on_or_before=search_end,
-        lookback_days=OPENSKY_LOOKBACK_DAYS,
+        flight,
     )
-    OPENSKY_CACHE.save(mission_id, search_date, route)
+    OPENSKY_CACHE.save(mission_id, observed_date, route)
     return route
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _available_observed_flights(
+    mission_id: str,
+    ending_date_iso: str,
+    lookback_days: int,
+) -> tuple[str, ...]:
+    """Return only actual OpenSky flights for the mission's recent UTC dates."""
+
+    mission = get_mission(mission_id)
+    ending_date = date.fromisoformat(ending_date_iso)
+    end = datetime.combine(ending_date + timedelta(days=1), time.min, tzinfo=UTC)
+    begin = end - timedelta(days=lookback_days)
+    provider = OpenSkyTrackProvider(
+        network_enabled=True,
+        client_id=_credential("OPENSKY_CLIENT_ID"),
+        client_secret=_credential("OPENSKY_CLIENT_SECRET"),
+    )
+    flights = provider.observed_flights_for_airports(
+        mission.origin,
+        mission.destination,
+        begin=begin,
+        end=end - timedelta(seconds=1),
+    )
+    latest_by_day: dict[date, OpenSkyObservedFlight] = {}
+    for flight in flights:
+        flight_date = flight.first_seen.date()
+        current = latest_by_day.get(flight_date)
+        if current is None or flight.first_seen > current.first_seen:
+            latest_by_day[flight_date] = flight
+    return tuple(
+        flight.model_dump_json()
+        for flight in sorted(
+            latest_by_day.values(), key=lambda item: item.first_seen, reverse=True
+        )
+    )
+
+
+def _cached_observed_flights(
+    mission_id: str,
+    ending_date: date,
+    lookback_days: int,
+) -> tuple[OpenSkyObservedFlight, ...]:
+    """Recover selectable real-flight identities from validated private route caches."""
+
+    mission = get_mission(mission_id)
+    flights: dict[str, OpenSkyObservedFlight] = {}
+    for offset in range(lookback_days):
+        observed_date = ending_date - timedelta(days=offset)
+        route = OPENSKY_CACHE.load(
+            mission_id,
+            observed_date,
+            origin_icao=mission.origin.icao,
+            destination_icao=mission.destination.icao,
+        )
+        source = None if route is None else route.source
+        if (
+            source is None
+            or source.flight_id is None
+            or source.observed_start is None
+            or source.observed_end is None
+            or ":" not in source.flight_id
+        ):
+            continue
+        icao24, first_seen_raw = source.flight_id.split(":", 1)
+        try:
+            first_seen = datetime.fromtimestamp(int(first_seen_raw), tz=UTC)
+            flight = OpenSkyObservedFlight(
+                icao24=icao24,
+                callsign=source.callsign,
+                first_seen=first_seen,
+                last_seen=source.observed_end,
+                origin_icao=mission.origin.icao,
+                destination_icao=mission.destination.icao,
+            )
+        except (ValueError, OSError):
+            continue
+        flights[flight.flight_id] = flight
+    return tuple(sorted(flights.values(), key=lambda item: item.first_seen, reverse=True))
 
 
 def _imperial_boundary_reason(reason: str) -> str:
@@ -411,7 +496,17 @@ st.markdown(
 )
 
 navigation_left, navigation_right = st.columns([4.6, 1.4], vertical_alignment="center")
-selected_aircraft = AIRCRAFT_STORE.load("aircraft_one")
+stored_aircraft = AIRCRAFT_STORE.load("aircraft_one")
+stored_aircraft_checksum = (
+    None
+    if stored_aircraft is None
+    else stored_aircraft.workbook_checksum or f"revision-{stored_aircraft.revision}"
+)
+selected_aircraft = (
+    stored_aircraft
+    if st.session_state.get("active_aircraft_checksum") == stored_aircraft_checksum
+    else None
+)
 with navigation_left:
     st.caption("Real OpenSky route geometry · source-backed aircraft · automatic NOAA matching")
 if selected_aircraft is not None:
@@ -442,11 +537,13 @@ if selected_aircraft is None:
         )
     st.stop()
 
+assert selected_aircraft is not None
+
 workspace_missions = {
     item.mission_id: item for item in list_missions() if item.mission_id in WORKSPACE_MISSION_IDS
 }
-control_mission, control_date, control_aircraft, control_action = st.columns(
-    [1.35, 1.25, 1.6, 1], vertical_alignment="bottom"
+control_mission, control_flight, control_aircraft, control_action = st.columns(
+    [1.2, 1.8, 1.45, 1], vertical_alignment="bottom"
 )
 with control_mission:
     mission_id = st.selectbox(
@@ -457,13 +554,61 @@ with control_mission:
     )
 mission = get_mission(mission_id)
 yesterday = datetime.now(UTC).date() - timedelta(days=1)
-with control_date:
-    observed_date = st.date_input(
-        "OpenSky search ending (UTC)",
-        value=yesterday,
-        min_value=yesterday - timedelta(days=29),
-        max_value=yesterday,
+credentials_configured = bool(
+    _credential("OPENSKY_CLIENT_ID") and _credential("OPENSKY_CLIENT_SECRET")
+)
+cached_flights = _cached_observed_flights(
+    mission_id,
+    yesterday,
+    OPENSKY_LOOKBACK_DAYS,
+)
+discovery_error: str | None = None
+network_flights: tuple[OpenSkyObservedFlight, ...] = ()
+if credentials_configured:
+    try:
+        with st.spinner("Finding actual recent OpenSky flights for this airport pair…"):
+            network_flights = tuple(
+                OpenSkyObservedFlight.model_validate_json(payload)
+                for payload in _available_observed_flights(
+                    mission_id,
+                    yesterday.isoformat(),
+                    OPENSKY_LOOKBACK_DAYS,
+                )
+            )
+    except (RuntimeError, ValueError, OSError) as exc:
+        discovery_error = str(exc)
+
+available_by_id = {
+    flight.flight_id: flight for flight in (*network_flights, *cached_flights)
+}
+available_flights = tuple(
+    sorted(available_by_id.values(), key=lambda item: item.first_seen, reverse=True)
+)
+if not available_flights:
+    reason = (
+        discovery_error
+        or "OpenSky credentials are not configured and no real observed flight is cached"
     )
+    st.error(f"No selectable OpenSky flight is available: {reason}.")
+    st.caption(
+        "MachLane stopped before NOAA or terrain processing. It did not substitute another date or invent a route."
+    )
+    st.stop()
+
+flight_by_id = {flight.flight_id: flight for flight in available_flights}
+with control_flight:
+    selected_flight_id = st.selectbox(
+        "Observed OpenSky flight",
+        list(flight_by_id),
+        format_func=lambda value: (
+            f"{flight_by_id[value].callsign or flight_by_id[value].icao24.upper()} · "
+            f"{flight_by_id[value].first_seen:%b %d, %Y · %H:%M UTC}"
+        ),
+        help="Only real flights returned by OpenSky or a checksum-validated private cache appear here.",
+    )
+selected_flight = flight_by_id[selected_flight_id]
+selected_flight_json = selected_flight.model_dump_json()
+observed_date = selected_flight.first_seen.date()
 with control_aircraft:
     st.text_input(
         "Aircraft",
@@ -494,14 +639,16 @@ cached_route = OPENSKY_CACHE.load(
     origin_icao=mission.origin.icao,
     destination_icao=mission.destination.icao,
 )
-credentials_configured = bool(
-    _credential("OPENSKY_CLIENT_ID") and _credential("OPENSKY_CLIENT_SECRET")
+cached_route_matches_flight = bool(
+    cached_route is not None
+    and cached_route.source is not None
+    and cached_route.source.flight_id == selected_flight.flight_id
 )
-can_run = cached_route is not None or credentials_configured
+can_run = cached_route_matches_flight or credentials_configured
 with control_action:
     run_analysis = st.button("Run analysis", disabled=not can_run, width="stretch")
 
-if cached_route is not None:
+if cached_route_matches_flight and cached_route is not None:
     source = cached_route.source
     retrieved = "unknown" if source is None else source.retrieved_at.strftime("%Y-%m-%d %H:%M UTC")
     st.caption(
@@ -513,11 +660,16 @@ elif not credentials_configured:
     )
     st.stop()
 
-route_state_key = f"real-route:{mission_id}:{observed_date.isoformat()}"
+flight_state_id = hashlib.sha256(selected_flight.flight_id.encode()).hexdigest()[:12]
+route_state_key = f"real-route:{mission_id}:{observed_date.isoformat()}:{flight_state_id}"
 if run_analysis:
     try:
         with st.spinner("Loading the real OpenSky track…"):
-            route = _load_or_fetch_route(mission_id, observed_date, force_refresh=False)
+            route = _load_or_fetch_route(
+                mission_id,
+                selected_flight_json,
+                force_refresh=False,
+            )
         st.session_state[route_state_key] = route.model_dump_json()
     except (RuntimeError, ValueError, OSError) as exc:
         st.error(f"OpenSky route unavailable: {exc}")
@@ -526,7 +678,7 @@ if run_analysis:
 route_json = st.session_state.get(route_state_key)
 if not isinstance(route_json, str):
     st.info(
-        "The OpenSky route is ready. Click **Run analysis** to load NOAA weather, available 3DEP terrain, and—when registered—the physical propagation wrapper."
+        "Select an observed OpenSky flight and click **Run analysis**. NOAA and terrain will be matched only to that flight's real position and UTC timestamps."
     )
     st.stop()
 

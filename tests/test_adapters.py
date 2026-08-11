@@ -84,21 +84,21 @@ def test_opensky_adapter_imports_latest_matching_observed_track(monkeypatch) -> 
                         {
                             "icao24": "abc123",
                             "callsign": "OLD1",
-                            "firstSeen": 1_754_179_200,
-                            "lastSeen": 1_754_208_000,
+                            "firstSeen": 1_785_715_200,
+                            "lastSeen": 1_785_744_000,
                             "estArrivalAirport": "KJFK",
                         },
                         {
                             "icao24": "def456",
                             "callsign": "TEST42 ",
-                            "firstSeen": 1_754_265_600,
-                            "lastSeen": 1_754_294_400,
+                            "firstSeen": 1_785_772_800,
+                            "lastSeen": 1_785_801_600,
                             "estArrivalAirport": "KJFK",
                         },
                         {
                             "icao24": "ffffff",
-                            "firstSeen": 1_754_265_600,
-                            "lastSeen": 1_754_294_400,
+                            "firstSeen": 1_785_772_800,
+                            "lastSeen": 1_785_801_600,
                             "estArrivalAirport": "KBOS",
                         },
                     ]
@@ -109,14 +109,14 @@ def test_opensky_adapter_imports_latest_matching_observed_track(monkeypatch) -> 
                 {
                     "icao24": "def456",
                     "callsign": "TEST42 ",
-                    "startTime": 1_754_265_600,
-                    "endTime": 1_754_294_400,
+                    "startTime": 1_785_772_800,
+                    "endTime": 1_785_801_600,
                     "path": [
-                        [1_754_265_600, 32.90, -97.04, 0, 0, True],
-                        [1_754_265_700, 32.90, -97.04, 100, 0, False],
-                        [1_754_266_000, 33.10, -96.70, 5_000, 65, False],
-                        [1_754_270_000, 36.50, -88.00, 11_000, 70, False],
-                        [1_754_294_000, 40.60, -73.80, 2_000, 75, False],
+                        [1_785_772_800, 32.90, -97.04, 0, 0, True],
+                        [1_785_772_900, 32.90, -97.04, 100, 0, False],
+                        [1_785_773_200, 33.10, -96.70, 5_000, 65, False],
+                        [1_785_777_200, 36.50, -88.00, 11_000, 70, False],
+                        [1_785_801_200, 40.60, -73.80, 2_000, 75, False],
                     ],
                 }
             )
@@ -145,7 +145,7 @@ def test_opensky_adapter_imports_latest_matching_observed_track(monkeypatch) -> 
     assert route.source is not None
     assert route.source.data_kind == "observed_track"
     assert route.source.callsign == "TEST42"
-    assert route.source.flight_id == "def456:1754265600"
+    assert route.source.flight_id == "def456:1785772800"
     assert route.source.point_count == 5
     assert route.source.checksum
     assert len(route.observations) == 5

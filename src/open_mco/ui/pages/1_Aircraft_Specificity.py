@@ -74,7 +74,7 @@ uploaded = st.file_uploader(
     ),
 )
 
-definition = STORE.load("aircraft_one")
+definition: AircraftDefinition | None = None
 if uploaded is not None:
     try:
         definition = load_aircraft_definition_workbook(uploaded.getvalue())
@@ -527,6 +527,9 @@ with save_col:
         except (ValueError, OSError) as exc:
             st.error(f"Aircraft was not saved: {exc}")
         else:
+            st.session_state["active_aircraft_checksum"] = (
+                updated.workbook_checksum or f"revision-{updated.revision}"
+            )
             if updated.phase_profile_ready:
                 st.switch_page("app.py")
             else:

@@ -16,7 +16,7 @@ from .missions import (
     get_mission,
     list_missions,
 )
-from .opensky import OpenSkyRouteNotFoundError, OpenSkyTrackProvider
+from .opensky import OpenSkyObservedFlight, OpenSkyRouteNotFoundError, OpenSkyTrackProvider
 from .weather import (
     AUTOMATIC_WEATHER_POLICY_VERSION,
     AUTOMATIC_WEATHER_SAMPLE_SPACING_M,
@@ -35,6 +35,7 @@ __all__ = [
     "Airport",
     "MissionDefinition",
     "OpenSkyRouteCache",
+    "OpenSkyObservedFlight",
     "OpenSkyTrackProvider",
     "OpenSkyRouteNotFoundError",
     "AUTOMATIC_WEATHER_POLICY_VERSION",

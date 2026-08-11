@@ -132,7 +132,9 @@ Follow these steps:
 6. Wait for validation, then confirm that the NASA ST55 fields and 10 flight phases appear.
 7. Click **Save aircraft & open routes**.
 8. Select **DFW → JFK** or **LAX → JFK** under **Mission**.
-9. Select the OpenSky search-ending date. Start with the latest available date.
+9. Select an **Observed OpenSky flight**. The list contains only real matching departures, shown
+   with their callsign and actual UTC departure time; MachLane never searches backward from an
+   arbitrary date or substitutes a different flight.
 10. Click **Run analysis**.
 11. Let the analysis finish without closing the Terminal or browser. MachLane loads the real
     OpenSky track, matches NOAA weather across the flight, checks available 3DEP terrain, and forms

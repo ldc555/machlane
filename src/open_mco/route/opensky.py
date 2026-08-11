@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
+from pydantic import BaseModel, ConfigDict
 
 from open_mco.models import Route, RouteObservation, RouteSourceMetadata
 
@@ -19,6 +20,49 @@ from .missions import Airport
 
 class OpenSkyRouteNotFoundError(ValueError):
     """No usable observed route matched the requested airport pair and time window."""
+
+
+class OpenSkyObservedFlight(BaseModel):
+    """One real OpenSky flight record suitable for explicit user selection."""
+
+    model_config = ConfigDict(frozen=True)
+
+    icao24: str
+    callsign: str | None = None
+    first_seen: datetime
+    last_seen: datetime
+    origin_icao: str
+    destination_icao: str
+
+    @property
+    def flight_id(self) -> str:
+        return f"{self.icao24}:{int(self.first_seen.timestamp())}"
+
+    @classmethod
+    def from_api(
+        cls,
+        payload: dict[str, Any],
+        *,
+        origin_icao: str,
+        destination_icao: str,
+    ) -> OpenSkyObservedFlight:
+        try:
+            icao24 = str(payload["icao24"]).lower()
+            first_seen = datetime.fromtimestamp(int(payload["firstSeen"]), tz=UTC)
+            last_seen = datetime.fromtimestamp(int(payload["lastSeen"]), tz=UTC)
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            raise ValueError("OpenSky flight record is missing its identity or timestamps") from exc
+        if last_seen <= first_seen:
+            raise ValueError("OpenSky flight record has a non-positive observation interval")
+        callsign = str(payload.get("callsign") or "").strip() or None
+        return cls(
+            icao24=icao24,
+            callsign=callsign,
+            first_seen=first_seen,
+            last_seen=last_seen,
+            origin_icao=origin_icao,
+            destination_icao=destination_icao,
+        )
 
 
 class OpenSkyTrackProvider:
@@ -72,29 +116,96 @@ class OpenSkyTrackProvider:
         """Fetch the latest matching departure and normalize its observed trajectory."""
 
         self._validate_request(begin, end, spacing_m)
-        departures = self._api_get(
-            "/flights/departure",
-            params={
-                "airport": origin.icao,
-                "begin": int(begin.timestamp()),
-                "end": int(end.timestamp()),
-            },
+        flights = self.observed_flights_for_airports(
+            origin,
+            destination,
+            begin=begin,
+            end=end,
         )
-        if departures is None:
+        if not flights:
             raise OpenSkyRouteNotFoundError(
-                f"OpenSky returned no departures from {origin.icao} in the requested interval"
+                f"OpenSky found no {origin.icao} → {destination.icao} flight in the requested interval"
             )
-        flight = self._latest_matching_flight(departures, destination.icao)
-        icao24 = str(flight["icao24"]).lower()
-        first_seen = int(flight["firstSeen"])
-        last_seen = int(flight["lastSeen"])
+        return self.route_for_observed_flight(
+            origin,
+            destination,
+            flights[0],
+            spacing_m=spacing_m,
+        )
+
+    def observed_flights_for_airports(
+        self,
+        origin: Airport,
+        destination: Airport,
+        *,
+        begin: datetime,
+        end: datetime,
+    ) -> tuple[OpenSkyObservedFlight, ...]:
+        """List real matching departures, newest first, over a bounded interval.
+
+        OpenSky airport-flight requests are partitioned into at most two UTC days. Splitting the
+        lookup keeps API usage predictable and lets the UI show only dates with an actual flight.
+        """
+
+        self._validate_flight_interval(begin, end)
+        flights: dict[str, OpenSkyObservedFlight] = {}
+        cursor = begin.astimezone(UTC)
+        end_utc = end.astimezone(UTC)
+        while cursor < end_utc:
+            chunk_end = min(cursor + timedelta(days=2) - timedelta(seconds=1), end_utc)
+            departures = self._api_get(
+                "/flights/departure",
+                params={
+                    "airport": origin.icao,
+                    "begin": int(cursor.timestamp()),
+                    "end": int(chunk_end.timestamp()),
+                },
+            )
+            if departures is not None:
+                if not isinstance(departures, list):
+                    raise ValueError("OpenSky departures response was not a list")
+                for value in departures:
+                    if not isinstance(value, dict):
+                        continue
+                    if value.get("estArrivalAirport") != destination.icao:
+                        continue
+                    try:
+                        flight = OpenSkyObservedFlight.from_api(
+                            value,
+                            origin_icao=origin.icao,
+                            destination_icao=destination.icao,
+                        )
+                    except ValueError:
+                        continue
+                    if begin <= flight.first_seen <= end:
+                        flights[flight.flight_id] = flight
+            cursor = chunk_end + timedelta(seconds=1)
+        return tuple(sorted(flights.values(), key=lambda item: item.first_seen, reverse=True))
+
+    def route_for_observed_flight(
+        self,
+        origin: Airport,
+        destination: Airport,
+        flight: OpenSkyObservedFlight,
+        *,
+        spacing_m: float = 185_200,
+    ) -> Route:
+        """Fetch the experimental track belonging to one explicitly selected flight."""
+
+        self._validate_request(flight.first_seen, flight.last_seen, spacing_m)
+        if flight.origin_icao != origin.icao or flight.destination_icao != destination.icao:
+            raise ValueError("selected OpenSky flight does not match the requested airport pair")
+        first_seen = int(flight.first_seen.timestamp())
+        last_seen = int(flight.last_seen.timestamp())
         track_time = first_seen + max(1, (last_seen - first_seen) // 2)
         track = self._api_get(
             "/tracks/all",
-            params={"icao24": icao24, "time": track_time},
+            params={"icao24": flight.icao24, "time": track_time},
         )
         if not isinstance(track, dict):
-            raise OpenSkyRouteNotFoundError(f"OpenSky returned no track for aircraft {icao24}")
+            raise OpenSkyRouteNotFoundError(
+                f"OpenSky returned no track for selected flight {flight.flight_id}"
+            )
         observations = self._track_observations(track)
         waypoints: list[tuple[float, float]] = []
         for point in observations:
@@ -104,20 +215,26 @@ class OpenSkyTrackProvider:
         if len(waypoints) < 2:
             raise ValueError("OpenSky track contains fewer than two distinct positions")
         checksum_payload = json.dumps(
-            {"flight": flight, "track": track}, sort_keys=True, separators=(",", ":")
+            {"flight": flight.model_dump(mode="json"), "track": track},
+            sort_keys=True,
+            separators=(",", ":"),
         ).encode()
         checksum = hashlib.sha256(checksum_payload).hexdigest()
         callsign = str(
-            track.get("callsign") or track.get("calllsign") or flight.get("callsign") or ""
+            track.get("callsign") or track.get("calllsign") or flight.callsign or ""
         ).strip()
         observed_start = observations[0].timestamp
         observed_end = observations[-1].timestamp
-        flight_id = f"{icao24}:{first_seen}"
-        source_url = f"{self.api_base_url}/tracks/all?icao24={icao24}&time={track_time}"
+        source_url = (
+            f"{self.api_base_url}/tracks/all?icao24={flight.icao24}&time={track_time}"
+        )
         return route_from_waypoints(
             waypoints,
             spacing_m=spacing_m,
-            name=f"OpenSky observed {origin.iata} → {destination.iata} · {callsign or icao24}",
+            name=(
+                f"OpenSky observed {origin.iata} → {destination.iata} · "
+                f"{callsign or flight.icao24}"
+            ),
             observations=tuple(observations),
             source=RouteSourceMetadata(
                 provider=self.name,
@@ -125,7 +242,7 @@ class OpenSkyTrackProvider:
                 retrieved_at=datetime.now(UTC),
                 source_url=source_url,
                 label="OBSERVED_OPENSKY_TRACK_EXPERIMENTAL_NOT_A_FILED_ROUTE",
-                flight_id=flight_id,
+                flight_id=flight.flight_id,
                 callsign=callsign or None,
                 origin_icao=origin.icao,
                 destination_icao=destination.icao,
@@ -179,6 +296,17 @@ class OpenSkyTrackProvider:
         raise OpenSkyRouteNotFoundError(message) from last_error
 
     def _validate_request(self, begin: datetime, end: datetime, spacing_m: float) -> None:
+        self._validate_flight_interval(begin, end, maximum_days=2)
+        if spacing_m <= 0:
+            raise ValueError("route spacing must be positive")
+
+    def _validate_flight_interval(
+        self,
+        begin: datetime,
+        end: datetime,
+        *,
+        maximum_days: int = 30,
+    ) -> None:
         if not self.network_enabled:
             raise RuntimeError("OpenSky network access is disabled; use an explicit fetch action")
         if os.getenv("MACHLANE_NETWORK_DISABLED") == "1":
@@ -192,10 +320,10 @@ class OpenSkyTrackProvider:
             raise ValueError("OpenSky begin and end must be timezone-aware")
         if end <= begin:
             raise ValueError("OpenSky end must be after begin")
-        if end - begin > timedelta(days=2):
-            raise ValueError("OpenSky airport-flight intervals cannot exceed two days")
-        if spacing_m <= 0:
-            raise ValueError("route spacing must be positive")
+        if end - begin > timedelta(days=maximum_days):
+            raise ValueError(
+                f"OpenSky flight discovery cannot exceed {maximum_days} days"
+            )
 
     def _access_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
         now = datetime.now(UTC)
@@ -266,29 +394,6 @@ class OpenSkyTrackProvider:
             raise
         except (requests.RequestException, ValueError) as exc:
             raise RuntimeError(f"OpenSky request failed: {exc}") from exc
-
-    @staticmethod
-    def _latest_matching_flight(payload: Any, destination_icao: str) -> dict[str, Any]:
-        if not isinstance(payload, list):
-            raise ValueError("OpenSky departures response was not a list")
-        candidates = []
-        for value in payload:
-            if not isinstance(value, dict):
-                continue
-            if value.get("estArrivalAirport") != destination_icao:
-                continue
-            if (
-                not value.get("icao24")
-                or value.get("firstSeen") is None
-                or value.get("lastSeen") is None
-            ):
-                continue
-            candidates.append(value)
-        if not candidates:
-            raise OpenSkyRouteNotFoundError(
-                f"OpenSky found no departure arriving at {destination_icao}"
-            )
-        return max(candidates, key=lambda value: int(value["firstSeen"]))
 
     @staticmethod
     def _track_observations(payload: dict[str, Any]) -> list[RouteObservation]:
