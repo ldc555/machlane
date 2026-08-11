@@ -20,5 +20,8 @@
 - Multi-azimuth ground intersections reuse each region's route-aligned 3DEP elevation away from the
   route centerline. The plotted dashed reflected ray is illustrative specular geometry; it does not
   model ground impedance, scattering, diffraction, terrain shadowing, or reflected-wave propagation.
+- Altitude sensitivities hold the baseline near-field signature, Mach, route, times, and aircraft
+  state fixed while changing source height. They do not verify performance, fuel, weight, angle of
+  attack, or source-signature validity at the changed altitude and are never operational recommendations.
 - The supplied NASA workbook is an unpopulated schema. Engineering values must be sourced and reviewed.
 - MachLane is not FAA approved and must not be used as operational flight-control authority.

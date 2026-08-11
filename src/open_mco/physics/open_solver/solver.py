@@ -7,13 +7,14 @@ import json
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from pyproj import Geod
 
 from open_mco.physics.route_analysis import (
     PhysicalRouteAnalysis,
+    RayFamily,
     RouteCandidateAnalysis,
     RouteSolverProvenance,
     SurfaceFootprintSample,
@@ -44,13 +45,15 @@ def _source_checksum() -> str:
 
 def _configuration_checksum() -> str:
     configuration = {
-        "schema": "machlane-open-primary-v1",
+        "schema": "machlane-open-primary-v2",
         "ray_model": "3D-heading stratified Snell primary ray",
         "nonlinearity": "conservative Rusanov finite volume",
         "absorption": "ISO-9613-style classical plus O2/N2 relaxation",
         "spreading": "cylindrical ray-tube proxy plus impedance stratification",
         "ground": "rigid pressure doubling",
         "launch_rolls_deg": [-60, -30, 0, 30, 60],
+        "altitude_sensitivity_ft": [-4000, -2000, 2000, 4000],
+        "altitude_sensitivity_source_signature": "frozen baseline signature",
         "secondary_rays": "not implemented",
         "loudness": "not implemented",
     }
@@ -97,185 +100,243 @@ def _signature_groups(aircraft: dict[str, Any]) -> dict[str, list[dict[str, Any]
     return groups
 
 
+def _calculate_candidate(
+    request: dict[str, Any],
+    *,
+    signature_groups: dict[str, list[dict[str, Any]]],
+    requested_families: tuple[RayFamily, ...],
+    candidate_id: str,
+    label: str,
+    altitude_offset_ft: float,
+) -> RouteCandidateAnalysis:
+    route_coordinates = tuple(
+        (float(latitude), float(longitude))
+        for latitude, longitude in request["route"]["waypoints"]
+    )
+    distance_m = sum(float(region["segment"]["distance_m"]) for region in request["regions"])
+    along_track_m = 0.0
+    samples: list[SurfaceFootprintSample] = []
+    skipped: list[str] = []
+    numerical_records: list[str] = []
+    for region in request["regions"]:
+        segment = region["segment"]
+        segment_distance = float(segment["distance_m"])
+        sample_along_track = along_track_m + segment_distance / 2.0
+        along_track_m += segment_distance
+        if region.get("propagation_eligibility") != "READY":
+            continue
+        matching_ids = [
+            identifier
+            for identifier in region.get("matching_signature_ids", [])
+            if identifier in signature_groups
+        ]
+        if not matching_ids:
+            skipped.append(f"{segment['segment_id']}: no matching signature")
+            continue
+        source_altitude_ft = (
+            float(region["planned_state"]["altitude_ft"]) + altitude_offset_ft
+        )
+        try:
+            terrain_elevation = _terrain_elevation(region)
+            column = column_from_mapping(region["atmosphere"])
+            mach = float(region["planned_state"]["mach"])
+            altitude_m = source_altitude_ft * FEET_TO_METERS
+        except (AtmosphereCoverageError, ResearchSolverUnavailableError, ValueError) as exc:
+            skipped.append(f"{segment['segment_id']}: {exc}")
+            continue
+        target_rolls = (-60.0, -30.0, 0.0, 30.0, 60.0)
+        selected_ids: list[str] = []
+        for target_roll in target_rolls:
+            selected_id = min(
+                matching_ids,
+                key=lambda identifier: abs(
+                    _signed_roll(float(signature_groups[identifier][0]["azimuth_deg"]))
+                    - target_roll
+                ),
+            )
+            selected_roll = _signed_roll(
+                float(signature_groups[selected_id][0]["azimuth_deg"])
+            )
+            if abs(selected_roll - target_roll) <= 5 and selected_id not in selected_ids:
+                selected_ids.append(selected_id)
+
+        latitude, longitude = _segment_midpoint(segment)
+        for selected_id in selected_ids:
+            signature = signature_groups[selected_id]
+            roll = _signed_roll(float(signature[0]["azimuth_deg"]))
+            try:
+                ray = trace_primary_ray(
+                    column,
+                    source_altitude_m=altitude_m,
+                    ground_altitude_m=terrain_elevation,
+                    mach=mach,
+                    route_bearing_deg=float(segment["bearing_deg"]),
+                    launch_roll_deg=roll,
+                )
+                waveform = propagate_primary_waveform(
+                    axial_position_m=np.asarray(
+                        [
+                            float(item["axial_position_ft"]) * FEET_TO_METERS
+                            for item in signature
+                        ]
+                    ),
+                    nearfield_overpressure_pa=np.asarray(
+                        [
+                            float(item["delta_pressure_psf"]) * PSF_TO_PASCALS
+                            for item in signature
+                        ]
+                    ),
+                    reference_distance_m=float(signature[0]["reference_distance_ft"])
+                    * FEET_TO_METERS,
+                    mach=mach,
+                    ray=ray,
+                )
+            except (AtmosphereCoverageError, RayTraceError, ValueError) as exc:
+                skipped.append(f"{segment['segment_id']} roll {roll:+g}°: {exc}")
+                continue
+
+            receiver_longitude, receiver_latitude, _ = GEOD.fwd(
+                longitude,
+                latitude,
+                ray.bearing_deg,
+                ray.horizontal_distance_m,
+            )
+            pressure = waveform.overpressure_pa
+            positive_peak = max(0.0, float(np.max(pressure)))
+            negative_peak = min(0.0, float(np.min(pressure)))
+            samples.append(
+                SurfaceFootprintSample(
+                    candidate_id=candidate_id,
+                    segment_id=str(segment["segment_id"]),
+                    ray_family="PRIMARY",
+                    latitude=receiver_latitude,
+                    longitude=receiver_longitude,
+                    along_track_m=sample_along_track,
+                    cross_track_m=ray.cross_track_offset_m,
+                    terrain_elevation_m=terrain_elevation,
+                    time_s=tuple(float(value) for value in waveform.time_s),
+                    overpressure_pa=tuple(float(value) for value in pressure),
+                    peak_positive_overpressure_pa=positive_peak,
+                    peak_negative_overpressure_pa=negative_peak,
+                    perceived_level_db=None,
+                    a_weighted_exposure_db=None,
+                    ray_arrival_time_s=ray.travel_time_s,
+                    ground_incidence_deg=ray.ground_incidence_deg,
+                    uncertainty_upper_pa=None,
+                    launch_roll_deg=roll,
+                    reflection_factor=waveform.reflection_factor,
+                    source_altitude_ft=source_altitude_ft,
+                    ray_path_horizontal_m=tuple(
+                        float(value) for value in ray.horizontal_from_source_m
+                    ),
+                    ray_path_altitude_m=tuple(
+                        float(value) for value in ray.altitude_from_source_m
+                    ),
+                )
+            )
+            numerical_records.append(
+                f"{segment['segment_id']} roll {roll:+g}°: {waveform.step_count} steps, "
+                f"CFL {waveform.maximum_cfl:.3f}"
+            )
+
+    if not samples:
+        detail = "; ".join(skipped[:5]) or "no propagation-eligible supersonic region"
+        raise ResearchSolverUnavailableError(
+            f"open research solver produced no receiver for {candidate_id}: {detail}"
+        )
+    nominal_maximum = max(sample.peak_positive_overpressure_pa for sample in samples)
+    sensitivity_limitations: tuple[str, ...] = ()
+    if altitude_offset_ft:
+        sensitivity_limitations = (
+            "altitude sensitivity holds the baseline near-field signature fixed",
+            "aircraft performance, weight, angle of attack, and fuel feasibility are not recomputed",
+            "this sensitivity is not a recommended or compliant operating corridor",
+        )
+    return RouteCandidateAnalysis(
+        candidate_id=candidate_id,
+        label=label,
+        route_coordinates=route_coordinates,
+        distance_m=distance_m,
+        time_delta_min=0.0,
+        maximum_lateral_offset_m=0.0,
+        altitude_offset_ft=altitude_offset_ft,
+        requested_ray_families=requested_families,
+        completed_ray_families=("PRIMARY",),
+        surface_samples=tuple(samples),
+        maximum_nominal_overpressure_pa=nominal_maximum,
+        maximum_uncertainty_overpressure_pa=nominal_maximum,
+        classification="UNKNOWN",
+        operational_constraints_checked=(
+            "exact OpenSky baseline geometry",
+            "route/time-matched NOAA column",
+            "available route-aligned USGS 3DEP terrain",
+            (
+                "LM1021 near-field operating-point match"
+                if not altitude_offset_ft
+                else "baseline near-field signature frozen for altitude sensitivity"
+            ),
+        ),
+        limitations=(
+            "UNVALIDATED primary-ray research estimate",
+            "secondary-direct and secondary-indirect rays are not implemented",
+            "model-form and atmospheric uncertainty are not bounded",
+            "terrain is sampled from the route-aligned 3DEP preview, not a full receiver raster",
+            "off-track intersections reuse the region's route-aligned terrain elevation",
+            "rigid-ground pressure doubling is a declared conservative approximation",
+            "PLdB and ASEL are not implemented",
+            *sensitivity_limitations,
+            *skipped,
+            *numerical_records,
+        ),
+    )
+
+
 class OpenResearchRouteSolver:
     """Compute unvalidated primary-ray route estimates from public equations and real inputs."""
 
     name = "machlane-open-primary"
-    version = "0.2.0-unvalidated"
+    version = "0.3.0-unvalidated"
 
     def run(self, request: dict[str, Any]) -> PhysicalRouteAnalysis:
         if request.get("schema") != "machlane-route-solver-request-v1":
             raise ResearchSolverUnavailableError("unsupported physical request schema")
-        requested_families = tuple(request["acceptance"]["requested_ray_families"])
+        requested_families = cast(
+            tuple[RayFamily, ...],
+            tuple(request["acceptance"]["requested_ray_families"]),
+        )
         if "PRIMARY" not in requested_families:
             raise ResearchSolverUnavailableError("request does not include primary rays")
         signature_groups = _signature_groups(request["aircraft"])
         if not signature_groups:
             raise ResearchSolverUnavailableError("aircraft workbook contains no near-field signature")
 
-        route_coordinates = tuple(
-            (float(latitude), float(longitude))
-            for latitude, longitude in request["route"]["waypoints"]
-        )
-        distance_m = sum(float(region["segment"]["distance_m"]) for region in request["regions"])
-        along_track_m = 0.0
-        samples: list[SurfaceFootprintSample] = []
-        skipped: list[str] = []
-        numerical_records: list[str] = []
-        for region in request["regions"]:
-            segment = region["segment"]
-            segment_distance = float(segment["distance_m"])
-            sample_along_track = along_track_m + segment_distance / 2.0
-            along_track_m += segment_distance
-            if region.get("propagation_eligibility") != "READY":
-                continue
-            matching_ids = [
-                identifier
-                for identifier in region.get("matching_signature_ids", [])
-                if identifier in signature_groups
-            ]
-            if not matching_ids:
-                skipped.append(f"{segment['segment_id']}: no matching signature")
-                continue
-            try:
-                terrain_elevation = _terrain_elevation(region)
-                column = column_from_mapping(region["atmosphere"])
-                mach = float(region["planned_state"]["mach"])
-                altitude_m = float(region["planned_state"]["altitude_ft"]) * FEET_TO_METERS
-            except (AtmosphereCoverageError, RayTraceError, ResearchSolverUnavailableError, ValueError) as exc:
-                skipped.append(f"{segment['segment_id']}: {exc}")
-                continue
-            target_rolls = (-60.0, -30.0, 0.0, 30.0, 60.0)
-            selected_ids: list[str] = []
-            for target_roll in target_rolls:
-                selected_id = min(
-                    matching_ids,
-                    key=lambda identifier: abs(
-                        _signed_roll(
-                            float(signature_groups[identifier][0]["azimuth_deg"])
-                        )
-                        - target_roll
-                    ),
-                )
-                selected_roll = _signed_roll(
-                    float(signature_groups[selected_id][0]["azimuth_deg"])
-                )
-                if abs(selected_roll - target_roll) <= 5 and selected_id not in selected_ids:
-                    selected_ids.append(selected_id)
-
-            latitude, longitude = _segment_midpoint(segment)
-            for selected_id in selected_ids:
-                signature = signature_groups[selected_id]
-                roll = _signed_roll(float(signature[0]["azimuth_deg"]))
-                try:
-                    ray = trace_primary_ray(
-                        column,
-                        source_altitude_m=altitude_m,
-                        ground_altitude_m=terrain_elevation,
-                        mach=mach,
-                        route_bearing_deg=float(segment["bearing_deg"]),
-                        launch_roll_deg=roll,
-                    )
-                    waveform = propagate_primary_waveform(
-                        axial_position_m=np.asarray(
-                            [
-                                float(item["axial_position_ft"]) * FEET_TO_METERS
-                                for item in signature
-                            ]
-                        ),
-                        nearfield_overpressure_pa=np.asarray(
-                            [
-                                float(item["delta_pressure_psf"]) * PSF_TO_PASCALS
-                                for item in signature
-                            ]
-                        ),
-                        reference_distance_m=float(signature[0]["reference_distance_ft"])
-                        * FEET_TO_METERS,
-                        mach=mach,
-                        ray=ray,
-                    )
-                except (AtmosphereCoverageError, RayTraceError, ValueError) as exc:
-                    skipped.append(f"{segment['segment_id']} roll {roll:+g}°: {exc}")
-                    continue
-
-                receiver_longitude, receiver_latitude, _ = GEOD.fwd(
-                    longitude,
-                    latitude,
-                    ray.bearing_deg,
-                    ray.horizontal_distance_m,
-                )
-                pressure = waveform.overpressure_pa
-                positive_peak = max(0.0, float(np.max(pressure)))
-                negative_peak = min(0.0, float(np.min(pressure)))
-                samples.append(
-                    SurfaceFootprintSample(
-                        candidate_id="baseline",
-                        segment_id=str(segment["segment_id"]),
-                        ray_family="PRIMARY",
-                        latitude=receiver_latitude,
-                        longitude=receiver_longitude,
-                        along_track_m=sample_along_track,
-                        cross_track_m=ray.cross_track_offset_m,
-                        terrain_elevation_m=terrain_elevation,
-                        time_s=tuple(float(value) for value in waveform.time_s),
-                        overpressure_pa=tuple(float(value) for value in pressure),
-                        peak_positive_overpressure_pa=positive_peak,
-                        peak_negative_overpressure_pa=negative_peak,
-                        perceived_level_db=None,
-                        a_weighted_exposure_db=None,
-                        ray_arrival_time_s=ray.travel_time_s,
-                        ground_incidence_deg=ray.ground_incidence_deg,
-                        uncertainty_upper_pa=None,
-                        launch_roll_deg=roll,
-                        reflection_factor=waveform.reflection_factor,
-                        ray_path_horizontal_m=tuple(
-                            float(value) for value in ray.horizontal_from_source_m
-                        ),
-                        ray_path_altitude_m=tuple(
-                            float(value) for value in ray.altitude_from_source_m
-                        ),
-                    )
-                )
-                numerical_records.append(
-                    f"{segment['segment_id']} roll {roll:+g}°: {waveform.step_count} steps, "
-                    f"CFL {waveform.maximum_cfl:.3f}"
-                )
-
-        if not samples:
-            detail = "; ".join(skipped[:5]) or "no propagation-eligible supersonic region"
-            raise ResearchSolverUnavailableError(f"open research solver produced no receiver: {detail}")
-        nominal_maximum = max(sample.peak_positive_overpressure_pa for sample in samples)
-        candidate = RouteCandidateAnalysis(
+        candidate = _calculate_candidate(
+            request,
+            signature_groups=signature_groups,
+            requested_families=requested_families,
             candidate_id="baseline",
             label="OpenSky baseline · primary-ray research estimate",
-            route_coordinates=route_coordinates,
-            distance_m=distance_m,
-            time_delta_min=0.0,
-            maximum_lateral_offset_m=0.0,
-            requested_ray_families=requested_families,
-            completed_ray_families=("PRIMARY",),
-            surface_samples=tuple(samples),
-            maximum_nominal_overpressure_pa=nominal_maximum,
-            maximum_uncertainty_overpressure_pa=nominal_maximum,
-            classification="UNKNOWN",
-            operational_constraints_checked=(
-                "exact OpenSky baseline geometry",
-                "route/time-matched NOAA column",
-                "available route-aligned USGS 3DEP terrain",
-                "LM1021 near-field operating-point match",
-            ),
-            limitations=(
-                "UNVALIDATED primary-ray research estimate",
-                "secondary-direct and secondary-indirect rays are not implemented",
-                "model-form and atmospheric uncertainty are not bounded",
-                "terrain is sampled from the route-aligned 3DEP preview, not a full receiver raster",
-                "off-track intersections reuse the region's route-aligned terrain elevation",
-                "rigid-ground pressure doubling is a declared conservative approximation",
-                "PLdB and ASEL are not implemented",
-                *skipped,
-                *numerical_records,
-            ),
+            altitude_offset_ft=0.0,
         )
+        candidates = [candidate]
+        boom_limit_pa = float(request["acceptance"]["boom_limit_pa"])
+        if candidate.maximum_nominal_overpressure_pa > boom_limit_pa:
+            for altitude_offset_ft in (-4_000.0, -2_000.0, 2_000.0, 4_000.0):
+                try:
+                    sensitivity = _calculate_candidate(
+                        request,
+                        signature_groups=signature_groups,
+                        requested_families=requested_families,
+                        candidate_id=(
+                            f"altitude-{'plus' if altitude_offset_ft > 0 else 'minus'}-"
+                            f"{abs(int(altitude_offset_ft))}"
+                        ),
+                        label=f"Altitude sensitivity {altitude_offset_ft:+,.0f} ft",
+                        altitude_offset_ft=altitude_offset_ft,
+                    )
+                except ResearchSolverUnavailableError:
+                    continue
+                candidates.append(sensitivity)
         source_checksums: dict[str, str] = {}
         workbook_checksum = request["aircraft"].get("workbook_checksum")
         if workbook_checksum:
@@ -295,10 +356,10 @@ class OpenResearchRouteSolver:
                 ),
                 source_url="https://ntrs.nasa.gov/citations/20230005332",
             ),
-            boom_limit_pa=float(request["acceptance"]["boom_limit_pa"]),
+            boom_limit_pa=boom_limit_pa,
             baseline_candidate_id="baseline",
             recommended_candidate_id=None,
-            candidates=(candidate,),
+            candidates=tuple(candidates),
             source_checksums=source_checksums,
             assumptions=(
                 "horizontally stratified NOAA atmosphere within each route region",

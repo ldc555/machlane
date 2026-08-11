@@ -1018,6 +1018,62 @@ plan_summary[3].metric(
     delta_color="off",
 )
 
+research_suggestion = None
+baseline_primary_exceeds = False
+if physical_result is not None:
+    baseline_primary_exceeds = (
+        physical_result.baseline.maximum_nominal_overpressure_pa
+        > physical_result.boom_limit_pa
+    )
+    sensitivity_candidates = [
+        candidate
+        for candidate in physical_result.candidates
+        if candidate.candidate_id != physical_result.baseline_candidate_id
+        and candidate.altitude_offset_ft != 0
+    ]
+    if sensitivity_candidates:
+        best_sensitivity = min(
+            sensitivity_candidates,
+            key=lambda candidate: candidate.maximum_nominal_overpressure_pa,
+        )
+        if (
+            best_sensitivity.maximum_nominal_overpressure_pa
+            < physical_result.baseline.maximum_nominal_overpressure_pa
+        ):
+            research_suggestion = best_sensitivity
+
+ground_result_text = (
+    '<span class="pending">NOT CALCULATED</span><br/>No ground-intersection result is available.'
+    if physical_result is None
+    else (
+        f'<span class="pending">INTERSECTS TERRAIN</span><br/>{len(physical_result.baseline.surface_samples)} primary-ray receiver samples · '
+        f'{physical_result.baseline.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal maximum.'
+    )
+)
+mitigation_text = '<span class="pending">NOT TRIGGERED</span><br/>Run the physical analysis first.'
+if physical_result is not None:
+    if not baseline_primary_exceeds:
+        mitigation_text = (
+            '<span class="pending">NO CHANGE GENERATED</span><br/>'
+            'Nominal primary-ray estimate does not exceed the research threshold. This is not a no-boom or compliance finding.'
+        )
+    elif research_suggestion is not None:
+        sensitivity_threshold_text = (
+            "below the nominal research threshold"
+            if research_suggestion.maximum_nominal_overpressure_pa
+            <= physical_result.boom_limit_pa
+            else "still above the nominal research threshold"
+        )
+        mitigation_text = (
+            f'<span class="pending">HEIGHT SENSITIVITY</span><br/>{research_suggestion.altitude_offset_ft:+,.0f} ft lowers the nominal primary-ray maximum to '
+            f'{research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf ({sensitivity_threshold_text}) with the source signature held fixed.'
+        )
+    else:
+        mitigation_text = (
+            '<span class="pending">NO SUPPORTED OPTION</span><br/>'
+            'The baseline nominal primary-ray estimate exceeds the research threshold, but no calculated height sensitivity improved it.'
+        )
+
 physical_corridor_text = (
     '<span class="pending">NOT CALCULATED</span><br/>Atmospheric regions are not a compliant corridor.'
     if physical_result is None
@@ -1041,7 +1097,9 @@ st.markdown(
     f"""
 <div class="layer-grid">
   <div class="layer"><b>1 · Planned flight</b><span>{selected_aircraft.value('Aircraft Name') or selected_aircraft.display_name} phase profile applied to the real OpenSky baseline geometry · {flight_plan.block_time_min / 60:.2f} hr estimated block time.</span></div>
-  <div class="layer"><b>2 · Physical operating corridor</b><span>{physical_corridor_text}</span></div>
+  <div class="layer"><b>2 · Primary-ray ground result</b><span>{ground_result_text}</span></div>
+  <div class="layer"><b>3 · Research mitigation scenario</b><span>{mitigation_text}</span></div>
+  <div class="layer"><b>4 · Compliant operating corridor</b><span>{physical_corridor_text}</span></div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -1054,11 +1112,31 @@ with alert_left:
             "Alert mode is locked until a registered physical solver returns uncertainty-bounded primary, secondary-direct, and secondary-indirect surface results."
         )
     elif physical_result.solver.validation_status != "VALIDATED":
-        st.warning(
-            "Primary-ray surface waveforms were calculated by MachLane's open research solver. "
-            "A route variation is not released because secondary rays, model-form uncertainty, "
-            "alternate LM1021 operating-point signatures, and independent validation are incomplete."
-        )
+        if not baseline_primary_exceeds:
+            st.info(
+                "The modeled primary ray intersects terrain, but its nominal peak does not exceed "
+                "the research threshold. No mitigation scenario was triggered. This does not mean "
+                "that no sonic boom reaches the ground: secondary rays and uncertainty remain incomplete."
+            )
+        elif research_suggestion is not None:
+            sensitivity_threshold_text = (
+                "below the nominal research threshold"
+                if research_suggestion.maximum_nominal_overpressure_pa
+                <= physical_result.boom_limit_pa
+                else "still above the nominal research threshold"
+            )
+            st.warning(
+                "The modeled primary ray intersects terrain and its nominal peak exceeds the research "
+                f"threshold. A {research_suggestion.altitude_offset_ft:+,.0f} ft height sensitivity "
+                f"recalculates to {research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal—{sensitivity_threshold_text}—using the same route-time NOAA columns. "
+                "The near-field signature is held fixed, so this is a research mitigation scenario—not a cleared altitude or compliant corridor."
+            )
+        else:
+            st.warning(
+                "The modeled primary ray intersects terrain and its nominal peak exceeds the research "
+                "threshold. The available NOAA column and aircraft signature did not produce an improving "
+                "height sensitivity. Route/time/speed alternatives require corresponding NOAA samples and condition-matched near-field signatures."
+            )
     elif physical_result.baseline.classification == "EXCEEDS_LIMIT":
         st.error(
             "Baseline exceeds the research threshold. "
@@ -1073,12 +1151,17 @@ with alert_left:
     else:
         st.warning("Physical result is incomplete; no operating recommendation is permitted.")
 with alert_right:
-    show_suggested_variation = st.toggle(
-        "Suggested variation",
-        value=False,
-        disabled=physical_result is None or physical_result.recommended is None,
-        help="Shown only when a validated, uncertainty-bounded physical result contains a compliant alternative.",
-    )
+    if research_suggestion is not None:
+        st.metric(
+            "Research height scenario",
+            f"{research_suggestion.altitude_offset_ft:+,.0f} ft",
+            f"{research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal",
+            delta_color="off",
+        )
+    else:
+        st.metric("Research mitigation", "Not generated", "Automatic trigger", delta_color="off")
+
+show_suggested_variation = physical_result is not None and physical_result.recommended is not None
 
 atmosphere_layers = [
     pdk.Layer(
@@ -1735,6 +1818,7 @@ with boom_tab:
                     "Distance (mi)": candidate.distance_m * METERS_TO_MILES,
                     "Time change (min)": candidate.time_delta_min,
                     "Maximum offset (nmi)": candidate.maximum_lateral_offset_m / 1852,
+                    "Altitude change (ft)": candidate.altitude_offset_ft,
                     "Nominal max (psf)": candidate.maximum_nominal_overpressure_pa / PASCALS_PER_PSF,
                     "Upper max (psf)": (
                         candidate.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF

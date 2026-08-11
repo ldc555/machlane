@@ -14,12 +14,12 @@ from open_mco.physics.open_solver.rays import trace_primary_ray
 
 def _atmosphere() -> dict[str, object]:
     return {
-        "altitude_m": [100.0, 5_000.0, 10_000.0, 17_000.0],
-        "temperature_k": [288.0, 255.0, 225.0, 218.0],
-        "pressure_pa": [100_000.0, 54_000.0, 26_000.0, 8_500.0],
-        "zonal_wind_mps": [0.0, 5.0, 12.0, 18.0],
-        "meridional_wind_mps": [0.0, -2.0, -5.0, -8.0],
-        "humidity_fraction": [0.5, 0.3, 0.1, 0.02],
+        "altitude_m": [100.0, 5_000.0, 10_000.0, 17_000.0, 20_000.0],
+        "temperature_k": [288.0, 255.0, 225.0, 218.0, 217.0],
+        "pressure_pa": [100_000.0, 54_000.0, 26_000.0, 8_500.0, 5_500.0],
+        "zonal_wind_mps": [0.0, 5.0, 12.0, 18.0, 20.0],
+        "meridional_wind_mps": [0.0, -2.0, -5.0, -8.0, -9.0],
+        "humidity_fraction": [0.5, 0.3, 0.1, 0.02, 0.01],
         "latitude": 35.0,
         "longitude": -95.0,
         "valid_time": datetime(2026, 8, 3, 20, tzinfo=UTC).isoformat(),
@@ -29,8 +29,8 @@ def _atmosphere() -> dict[str, object]:
 
 def _request() -> dict[str, object]:
     symmetric_atmosphere = _atmosphere()
-    symmetric_atmosphere["zonal_wind_mps"] = [0.0, 0.0, 0.0, 0.0]
-    symmetric_atmosphere["meridional_wind_mps"] = [0.0, 0.0, 0.0, 0.0]
+    symmetric_atmosphere["zonal_wind_mps"] = [0.0, 0.0, 0.0, 0.0, 0.0]
+    symmetric_atmosphere["meridional_wind_mps"] = [0.0, 0.0, 0.0, 0.0, 0.0]
     waveform_points = (
         (900.0, 0.0),
         (1_000.0, 1.2),
@@ -139,6 +139,14 @@ def test_open_solver_calculates_waveform_but_fails_closed_on_secondary_rays() ->
     assert result.baseline.classification == "UNKNOWN"
     assert result.recommended is None
     assert result.baseline.completed_ray_families == ("PRIMARY",)
+    assert len(result.candidates) == 5
+    assert {candidate.altitude_offset_ft for candidate in result.candidates} == {
+        -4_000.0,
+        -2_000.0,
+        0.0,
+        2_000.0,
+        4_000.0,
+    }
     assert len(result.baseline.surface_samples) == 3
     assert {sample.launch_roll_deg for sample in result.baseline.surface_samples} == {
         -30.0,
@@ -153,6 +161,20 @@ def test_open_solver_calculates_waveform_but_fails_closed_on_secondary_rays() ->
     assert sample.uncertainty_upper_pa is None
     assert sample.perceived_level_db is None
     assert sample.reflection_factor == 2.0
+    assert sample.source_altitude_ft == 55_000
     assert len(sample.ray_path_horizontal_m) == len(sample.ray_path_altitude_m)
     assert sample.ray_path_horizontal_m[0] == 0
     assert sample.ray_path_horizontal_m[-1] > 0
+
+
+def test_altitude_sensitivities_are_not_generated_below_trigger() -> None:
+    request = _request()
+    acceptance = request["acceptance"]
+    assert isinstance(acceptance, dict)
+    acceptance["boom_limit_psf"] = 1.0
+    acceptance["boom_limit_pa"] = 47.88025898033584
+
+    result = OpenResearchRouteSolver().run(request)
+
+    assert [candidate.candidate_id for candidate in result.candidates] == ["baseline"]
+    assert result.recommended is None

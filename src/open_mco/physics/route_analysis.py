@@ -63,6 +63,7 @@ class SurfaceFootprintSample(FrozenModel):
     uncertainty_upper_pa: float | None = Field(default=None, ge=0)
     launch_roll_deg: float | None = Field(default=None, ge=-90, le=90)
     reflection_factor: float | None = Field(default=None, gt=0)
+    source_altitude_ft: float | None = Field(default=None, ge=0)
     ray_path_horizontal_m: tuple[float, ...] = ()
     ray_path_altitude_m: tuple[float, ...] = ()
 
@@ -109,6 +110,7 @@ class RouteCandidateAnalysis(FrozenModel):
     distance_m: float = Field(gt=0)
     time_delta_min: float
     maximum_lateral_offset_m: float = Field(ge=0)
+    altitude_offset_ft: float = 0.0
     requested_ray_families: tuple[RayFamily, ...] = Field(min_length=1)
     completed_ray_families: tuple[RayFamily, ...]
     surface_samples: tuple[SurfaceFootprintSample, ...] = Field(min_length=1)
@@ -436,6 +438,8 @@ def surface_sample_rows(result: PhysicalRouteAnalysis) -> list[dict[str, Any]]:
                     "ground_incidence_deg": sample.ground_incidence_deg,
                     "launch_roll_deg": sample.launch_roll_deg,
                     "reflection_factor": sample.reflection_factor,
+                    "source_altitude_ft": sample.source_altitude_ft,
+                    "candidate_altitude_offset_ft": candidate.altitude_offset_ft,
                 }
             )
     return rows

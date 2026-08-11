@@ -59,6 +59,11 @@ route segment ────────> bearing and WGS-84 position
    ground-intersection pattern (multi-azimuth only when matched off-axis signatures exist), an along-route overpressure/terrain profile,
    incident-versus-rigid-ground waveforms, and a ray/terrain cross-section with illustrative
    specular-reflection geometry. None is labeled as a validated footprint or compliant corridor.
+10. If the baseline nominal primary-ray value exceeds the research threshold, the open solver
+    attempts ±2,000 ft and ±4,000 ft altitude sensitivities through the same NOAA columns and rejects
+    source heights outside the available column. These
+    cases hold the baseline near-field signature fixed, retain classification `UNKNOWN`, and cannot
+    become the recommended candidate.
 
 ## Open-source roles and limits
 

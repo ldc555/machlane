@@ -205,6 +205,14 @@ These plots are diagnostic views, not validated boom contours. Off-track interse
 reuse the atmospheric region's route-aligned terrain elevation, and the dashed reflected ray shows
 the declared rigid-ground assumption rather than a frequency-dependent ground-interaction solution.
 
+When the baseline nominal primary-ray maximum exceeds the research threshold, the open solver also
+attempts four altitude sensitivities at −4,000, −2,000, +2,000, and +4,000 ft through the same
+route-time NOAA columns. Candidates outside the available column are rejected. MachLane displays
+the best improving case and says whether it remains above
+the threshold. The baseline near-field signature is deliberately held fixed, so this is a research
+sensitivity—not an aircraft-performance check, cleared altitude, route recommendation, or compliant
+operating corridor.
+
 The current FAA NPRM value of 0.11 psf is treated as a research screening threshold, not a final
 approval. A route is never recommended from nominal overpressure alone: all three requested ray
 families must complete, the uncertainty upper bound must remain within the threshold, and the
