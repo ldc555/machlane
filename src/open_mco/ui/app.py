@@ -481,6 +481,9 @@ st.markdown(
 .stTabs [data-baseweb="tab"] { color:#b5cce0; }
 .stTabs [aria-selected="true"] { color:#fff; background:#0c2840; }
 .stButton button { border:1px solid #2f6e69; background:#123a38; color:#d8fffa; }
+[data-testid="stDownloadButton"] button { background:#dff7ff !important; border:1px solid #67d9f5 !important; }
+[data-testid="stDownloadButton"] button,[data-testid="stDownloadButton"] button * { color:#04111d !important; font-weight:800 !important; opacity:1 !important; }
+[data-testid="stDownloadButton"] button:hover { background:#ffffff !important; border-color:#b9f2ff !important; }
 [data-testid="stPageLink"] a { min-height:3.2rem; justify-content:center; border:1px solid #39c9ef !important; border-radius:.5rem; background:linear-gradient(135deg,#0d5f83,#0a334e) !important; color:#fff !important; font-size:.92rem !important; font-weight:850 !important; box-shadow:0 0 20px rgba(48,213,255,.16); }
 [data-testid="stPageLink"] a:hover { border-color:#8ceaff !important; background:linear-gradient(135deg,#11739b,#0c4262) !important; }
 [data-testid="stWidgetLabel"],[data-testid="stWidgetLabel"] * { color:#e6f4ff !important; font-weight:700 !important; }
@@ -1098,7 +1101,7 @@ st.markdown(
 <div class="layer-grid">
   <div class="layer"><b>1 · Planned flight</b><span>{selected_aircraft.value('Aircraft Name') or selected_aircraft.display_name} phase profile applied to the real OpenSky baseline geometry · {flight_plan.block_time_min / 60:.2f} hr estimated block time.</span></div>
   <div class="layer"><b>2 · Primary-ray ground result</b><span>{ground_result_text}</span></div>
-  <div class="layer"><b>3 · Research mitigation scenario</b><span>{mitigation_text}</span></div>
+  <div class="layer"><b>3 · Proposed flight-path adjustment</b><span>{mitigation_text}</span></div>
   <div class="layer"><b>4 · Compliant operating corridor</b><span>{physical_corridor_text}</span></div>
 </div>
 """,
@@ -1153,13 +1156,23 @@ with alert_left:
 with alert_right:
     if research_suggestion is not None:
         st.metric(
-            "Research height scenario",
+            "Proposed height change",
             f"{research_suggestion.altitude_offset_ft:+,.0f} ft",
             f"{research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal",
             delta_color="off",
         )
     else:
-        st.metric("Research mitigation", "Not generated", "Automatic trigger", delta_color="off")
+        adjustment_state = (
+            "Not calculated"
+            if physical_result is None
+            else "No improving option" if baseline_primary_exceeds else "Not triggered"
+        )
+        st.metric(
+            "Flight-path adjustment",
+            adjustment_state,
+            "Automatic threshold trigger",
+            delta_color="off",
+        )
 
 show_suggested_variation = physical_result is not None and physical_result.recommended is not None
 
@@ -1716,9 +1729,9 @@ with terrain_tab:
     )
 
 with boom_tab:
-    st.markdown("#### Physical sonic-boom analysis")
+    st.markdown("#### Sonic boom and terrain")
     st.caption(
-        "MachLane can calculate an unvalidated primary-ray ground waveform from the LM1021 near-field signature, route-matched NOAA atmosphere, and available 3DEP terrain. FAA-oriented screening still requires bounded uncertainty, primary and secondary rays, and an independently validated method. A result is never inferred from ambient pressure alone."
+        "MachLane propagates the uploaded aircraft signature through route-matched NOAA atmosphere to available 3DEP terrain. Results below are primary-ray research estimates, not compliance findings."
     )
     coverage = physical_request["coverage_summary"]
     coverage_cards = st.columns(4)
@@ -1726,60 +1739,41 @@ with boom_tab:
     coverage_cards[1].metric("Near-field matched", f"{coverage['ready']}")
     coverage_cards[2].metric("Subsonic", f"{coverage['subsonic']}")
     coverage_cards[3].metric("Missing signature", f"{coverage['missing_nearfield']}")
-    workbook_boom_limit = selected_aircraft.numeric_value("Boom Limit")
-    if workbook_boom_limit is not None and abs(workbook_boom_limit - FAA_NPRM_RESEARCH_LIMIT_PSF) > 1e-9:
-        st.warning(
-            f"Workbook threshold {workbook_boom_limit:.2f} psf is retained as source data but is not used for FAA-oriented screening. This workspace uses the current NPRM research threshold of {FAA_NPRM_RESEARCH_LIMIT_PSF:.2f} psf."
-        )
-
-    request_column, result_column = st.columns(2)
-    with request_column:
-        st.download_button(
-            "Download complete solver request · JSON",
-            json.dumps(physical_request, indent=2, default=str),
-            file_name=f"machlane_{mission_id}_{observed_start:%Y%m%d}_physical_request.json",
-            mime="application/json",
-            width="stretch",
-        )
-        st.caption(
-            f"Request SHA-256 · {physical_request_checksum[:16]}… · includes aircraft, near-field, NOAA columns, terrain, phases, ray requirements, and rerouting search policy."
-        )
-    with result_column:
-        uploaded_physical_result = st.file_uploader(
-            "IMPORT sBOOM / PCBoom WRAPPER RESULT",
-            type=["json"],
-            help="Strict machlane-physical-route-v1 JSON. The request checksum and every waveform metric are revalidated before display.",
-        )
-        if uploaded_physical_result is not None:
-            uploaded_bytes = uploaded_physical_result.getvalue()
-            upload_digest = hashlib.sha256(uploaded_bytes).hexdigest()
-            try:
-                imported_result = load_physical_route_analysis(uploaded_bytes)
-                if imported_result.request_checksum != physical_request_checksum:
-                    raise ValueError("result belongs to a different aircraft, route, weather, or terrain request")
-            except (ValueError, OSError) as exc:
-                st.error(f"Physical result rejected: {exc}")
-            else:
-                if st.session_state.get("physical_upload_digest") != upload_digest:
-                    st.session_state[physical_state_key] = imported_result.model_dump_json()
-                    st.session_state["physical_upload_digest"] = upload_digest
-                    st.rerun()
-        if not propagation_command:
-            st.info(
-                "MachLane's built-in open primary-ray research solver runs with **Run analysis**. "
-                "It remains UNVALIDATED and does not calculate secondary rays, bounded uncertainty, "
-                "PLdB, or a compliant corridor. A reviewed sBOOM/PCBoom comparison wrapper can still "
-                "be registered through MACHLANE_PROPAGATION_COMMAND."
-            )
-        else:
-            st.success("Registered solver wrapper will run with the main Run analysis action.")
-
     if physical_result is None:
         st.error(
-            "GROUND BOOM NOT CALCULATED. The request bundle is complete, but no checksum-matched physical solver output is loaded."
+            "Ground intersection has not been calculated. Click Run analysis to use the loaded aircraft, NOAA atmosphere, and terrain."
         )
     else:
         baseline = physical_result.baseline
+        baseline_psf = baseline.maximum_nominal_overpressure_pa / PASCALS_PER_PSF
+        threshold_psf = physical_result.boom_limit_pa / PASCALS_PER_PSF
+        if baseline_primary_exceeds:
+            st.error(
+                f"GROUND BOOM WARNING · The primary-ray model intersects terrain at {baseline_psf:.3f} psf nominal, above the {threshold_psf:.2f} psf research threshold."
+            )
+            if research_suggestion is not None:
+                suggested_psf = (
+                    research_suggestion.maximum_nominal_overpressure_pa
+                    / PASCALS_PER_PSF
+                )
+                st.warning(
+                    f"PROPOSED FLIGHT-PATH ADJUSTMENT · Change cruise height by {research_suggestion.altitude_offset_ft:+,.0f} ft. "
+                    f"The recalculated primary-ray estimate is {suggested_psf:.3f} psf. "
+                    + (
+                        "It falls below the research threshold."
+                        if suggested_psf <= threshold_psf
+                        else "It improves the result but remains above the research threshold."
+                    )
+                    + " Aircraft performance and the source signature at this new height still require validation."
+                )
+            else:
+                st.warning(
+                    "NO IMPROVING FLIGHT-PATH ADJUSTMENT FOUND · The available height options did not lower the primary-ray estimate."
+                )
+        else:
+            st.success(
+                f"PRIMARY-RAY SCREEN · The modeled ray intersects terrain at {baseline_psf:.3f} psf nominal, below the {threshold_psf:.2f} psf research threshold. No adjustment was triggered."
+            )
         result_has_uncertainty = all(
             sample.uncertainty_upper_pa is not None for sample in baseline.surface_samples
         )
@@ -2133,35 +2127,73 @@ with boom_tab:
         )
 
         if len(physical_result.candidates) > 1:
-            trade_figure = go.Figure(
-                go.Scatter(
-                    x=candidate_frame["Time change (min)"],
-                    y=candidate_frame["Upper max (psf)"],
-                    text=candidate_frame["Candidate"],
-                    mode="markers+text",
-                    textposition="top center",
-                    marker={
-                        "size": [12 + value * 1.5 for value in candidate_frame["Maximum offset (nmi)"]],
-                        "color": [
-                            "#2df0cf" if value == "WITHIN_LIMIT" else "#ff5b79"
-                            for value in candidate_frame["Classification"]
-                        ],
-                    },
+            if physical_result.solver.validation_status != "VALIDATED":
+                sensitivity_frame = candidate_frame.sort_values("Altitude change (ft)")
+                trade_figure = go.Figure(
+                    go.Scatter(
+                        x=sensitivity_frame["Altitude change (ft)"],
+                        y=sensitivity_frame["Nominal max (psf)"],
+                        text=sensitivity_frame["Candidate"],
+                        mode="lines+markers+text",
+                        textposition="top center",
+                        line={"color": "#62839e", "width": 2},
+                        marker={
+                            "size": 13,
+                            "color": [
+                                (
+                                    "#2df0cf"
+                                    if research_suggestion is not None
+                                    and candidate_id == research_suggestion.candidate_id
+                                    else "#ffd447" if candidate_id == "baseline" else "#ff7b8f"
+                                )
+                                for candidate_id in sensitivity_frame["ID"]
+                            ],
+                            "line": {"color": "#ffffff", "width": 1},
+                        },
+                    )
                 )
-            )
+                trade_title = "Calculated height options · nominal primary-ray ground pressure"
+                trade_x_title = "Cruise-height change (ft)"
+                trade_y_title = "Nominal surface overpressure (psf)"
+            else:
+                trade_figure = go.Figure(
+                    go.Scatter(
+                        x=candidate_frame["Time change (min)"],
+                        y=candidate_frame["Upper max (psf)"],
+                        text=candidate_frame["Candidate"],
+                        mode="markers+text",
+                        textposition="top center",
+                        marker={
+                            "size": [
+                                12 + value * 1.5
+                                for value in candidate_frame["Maximum offset (nmi)"]
+                            ],
+                            "color": [
+                                "#2df0cf" if value == "WITHIN_LIMIT" else "#ff5b79"
+                                for value in candidate_frame["Classification"]
+                            ],
+                        },
+                    )
+                )
+                trade_title = "Strategic alternatives · time versus uncertainty-bounded boom"
+                trade_x_title = "Flight-time change (min)"
+                trade_y_title = "Maximum surface overpressure (psf)"
             trade_figure.add_hline(
                 y=physical_result.boom_limit_pa / PASCALS_PER_PSF,
                 line_color="#ff4466",
                 line_dash="dash",
+                annotation_text="Research threshold",
             )
             trade_figure.update_layout(
-                title="Strategic alternatives · time versus uncertainty-bounded boom",
-                xaxis_title="Flight-time change (min)",
-                yaxis_title="Maximum surface overpressure (psf)",
+                title=trade_title,
+                xaxis_title=trade_x_title,
+                yaxis_title=trade_y_title,
                 template="plotly_dark",
                 height=390,
                 paper_bgcolor="#081524",
                 plot_bgcolor="#081524",
+                font={"color": "#e9f2ff"},
+                title_font={"color": "#ffffff", "size": 18},
             )
             st.plotly_chart(trade_figure, width="stretch")
 
@@ -2169,21 +2201,21 @@ with boom_tab:
         flattened_samples = pd.DataFrame(surface_sample_rows(physical_result))
         download_columns = st.columns(4)
         download_columns[0].download_button(
-            "Surface samples · CSV",
+            "Boom + terrain · CSV",
             flattened_samples.to_csv(index=False),
             file_name=f"{physical_result.run_id}_surface_samples.csv",
             mime="text/csv",
             width="stretch",
         )
         download_columns[1].download_button(
-            "Footprint · GeoJSON",
+            "Ground intersections · GeoJSON",
             json.dumps(footprint_geojson(physical_result), indent=2),
             file_name=f"{physical_result.run_id}_footprint.geojson",
             mime="application/geo+json",
             width="stretch",
         )
         download_columns[2].download_button(
-            "Full result · JSON",
+            "Complete analysis · JSON",
             physical_result.model_dump_json(indent=2),
             file_name=f"{physical_result.run_id}_physical_result.json",
             mime="application/json",

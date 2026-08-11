@@ -556,8 +556,8 @@ with readiness_col:
     if not active_definition.nearfield_ready:
         blockers.append("near-field pressure signature")
     st.caption(
-        "Workbook aircraft inputs are present. A physical ground-boom result remains "
-        "locked until a reviewed propagation solver is registered."
+        "Workbook aircraft inputs are present. Run analysis can calculate the built-in "
+        "primary-ray research estimate; compliant-corridor approval remains unavailable."
         if not blockers
         else "Still required for full continuous boom analysis: " + ", ".join(blockers) + "."
     )
