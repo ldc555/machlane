@@ -64,6 +64,9 @@ route segment ────────> bearing and WGS-84 position
     source heights outside the available column. These
     cases hold the baseline near-field signature fixed, retain classification `UNKNOWN`, and cannot
     become the recommended candidate.
+11. An adaptive route-specific profile chooses among those available heights independently in every
+    affected atmospheric region. It leaves regions below the baseline research trigger unchanged
+    and remains `UNKNOWN`/unvalidated.
 
 ## Open-source roles and limits
 

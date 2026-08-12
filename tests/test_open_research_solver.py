@@ -139,7 +139,7 @@ def test_open_solver_calculates_waveform_but_fails_closed_on_secondary_rays() ->
     assert result.baseline.classification == "UNKNOWN"
     assert result.recommended is None
     assert result.baseline.completed_ray_families == ("PRIMARY",)
-    assert len(result.candidates) == 5
+    assert len(result.candidates) == 6
     assert {candidate.altitude_offset_ft for candidate in result.candidates} == {
         -4_000.0,
         -2_000.0,
@@ -147,6 +147,13 @@ def test_open_solver_calculates_waveform_but_fails_closed_on_secondary_rays() ->
         2_000.0,
         4_000.0,
     }
+    adaptive = next(
+        candidate
+        for candidate in result.candidates
+        if candidate.candidate_id == "adaptive-height-profile"
+    )
+    assert adaptive.altitude_profile_ft == (("S0001", -4_000.0),)
+    assert adaptive.maximum_nominal_overpressure_pa < result.baseline.maximum_nominal_overpressure_pa
     assert len(result.baseline.surface_samples) == 3
     assert {sample.launch_roll_deg for sample in result.baseline.surface_samples} == {
         -30.0,

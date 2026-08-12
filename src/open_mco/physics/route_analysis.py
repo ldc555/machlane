@@ -111,6 +111,7 @@ class RouteCandidateAnalysis(FrozenModel):
     time_delta_min: float
     maximum_lateral_offset_m: float = Field(ge=0)
     altitude_offset_ft: float = 0.0
+    altitude_profile_ft: tuple[tuple[str, float], ...] = ()
     requested_ray_families: tuple[RayFamily, ...] = Field(min_length=1)
     completed_ray_families: tuple[RayFamily, ...]
     surface_samples: tuple[SurfaceFootprintSample, ...] = Field(min_length=1)
@@ -441,6 +442,9 @@ def surface_sample_rows(result: PhysicalRouteAnalysis) -> list[dict[str, Any]]:
                     "source_altitude_ft": getattr(sample, "source_altitude_ft", None),
                     "candidate_altitude_offset_ft": float(
                         getattr(candidate, "altitude_offset_ft", 0.0)
+                    ),
+                    "candidate_altitude_profile_ft": getattr(
+                        candidate, "altitude_profile_ft", ()
                     ),
                 }
             )

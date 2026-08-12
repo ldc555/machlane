@@ -23,5 +23,8 @@
 - Altitude sensitivities hold the baseline near-field signature, Mach, route, times, and aircraft
   state fixed while changing source height. They do not verify performance, fuel, weight, angle of
   attack, or source-signature validity at the changed altitude and are never operational recommendations.
+- The adaptive height profile selects independently among discrete available sensitivities in each
+  modeled region. It does not solve vertical transitions, climb rate, passenger comfort, fuel,
+  weight evolution, or continuity constraints between neighboring regions.
 - The supplied NASA workbook is an unpopulated schema. Engineering values must be sourced and reviewed.
 - MachLane is not FAA approved and must not be used as operational flight-control authority.

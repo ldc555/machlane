@@ -45,7 +45,7 @@ def _source_checksum() -> str:
 
 def _configuration_checksum() -> str:
     configuration = {
-        "schema": "machlane-open-primary-v2",
+        "schema": "machlane-open-primary-v3",
         "ray_model": "3D-heading stratified Snell primary ray",
         "nonlinearity": "conservative Rusanov finite volume",
         "absorption": "ISO-9613-style classical plus O2/N2 relaxation",
@@ -54,6 +54,7 @@ def _configuration_checksum() -> str:
         "launch_rolls_deg": [-60, -30, 0, 30, 60],
         "altitude_sensitivity_ft": [-4000, -2000, 2000, 4000],
         "altitude_sensitivity_source_signature": "frozen baseline signature",
+        "adaptive_height_profile": "lowest available pressure in affected regions only",
         "secondary_rays": "not implemented",
         "loudness": "not implemented",
     }
@@ -291,11 +292,100 @@ def _calculate_candidate(
     )
 
 
+def _adaptive_height_candidate(
+    candidates: list[RouteCandidateAnalysis],
+    *,
+    boom_limit_pa: float,
+    requested_families: tuple[RayFamily, ...],
+) -> RouteCandidateAnalysis | None:
+    """Choose the lowest-pressure available height independently in each affected region."""
+
+    baseline = candidates[0]
+    samples_by_candidate_segment: dict[str, dict[str, list[SurfaceFootprintSample]]] = {}
+    for candidate in candidates:
+        by_segment: dict[str, list[SurfaceFootprintSample]] = defaultdict(list)
+        for sample in candidate.surface_samples:
+            by_segment[sample.segment_id].append(sample)
+        samples_by_candidate_segment[candidate.candidate_id] = by_segment
+
+    selected_samples: list[SurfaceFootprintSample] = []
+    altitude_profile: list[tuple[str, float]] = []
+    changed = False
+    baseline_segments = samples_by_candidate_segment[baseline.candidate_id]
+    for segment_id, baseline_samples in baseline_segments.items():
+        baseline_peak = max(
+            sample.peak_positive_overpressure_pa for sample in baseline_samples
+        )
+        selected_candidate = baseline
+        selected_segment_samples = baseline_samples
+        if baseline_peak > boom_limit_pa:
+            for candidate in candidates[1:]:
+                candidate_samples = samples_by_candidate_segment[candidate.candidate_id].get(
+                    segment_id
+                )
+                if not candidate_samples:
+                    continue
+                candidate_peak = max(
+                    sample.peak_positive_overpressure_pa for sample in candidate_samples
+                )
+                selected_peak = max(
+                    sample.peak_positive_overpressure_pa
+                    for sample in selected_segment_samples
+                )
+                if candidate_peak < selected_peak:
+                    selected_candidate = candidate
+                    selected_segment_samples = candidate_samples
+        selected_offset = selected_candidate.altitude_offset_ft
+        altitude_profile.append((segment_id, selected_offset))
+        changed = changed or selected_offset != 0
+        selected_samples.extend(
+            sample.model_copy(update={"candidate_id": "adaptive-height-profile"})
+            for sample in selected_segment_samples
+        )
+
+    if not changed:
+        return None
+    nominal_maximum = max(
+        sample.peak_positive_overpressure_pa for sample in selected_samples
+    )
+    if nominal_maximum >= baseline.maximum_nominal_overpressure_pa:
+        return None
+    return RouteCandidateAnalysis(
+        candidate_id="adaptive-height-profile",
+        label="Adaptive height profile · region by region",
+        route_coordinates=baseline.route_coordinates,
+        distance_m=baseline.distance_m,
+        time_delta_min=0.0,
+        maximum_lateral_offset_m=0.0,
+        altitude_offset_ft=0.0,
+        altitude_profile_ft=tuple(altitude_profile),
+        requested_ray_families=requested_families,
+        completed_ray_families=("PRIMARY",),
+        surface_samples=tuple(selected_samples),
+        maximum_nominal_overpressure_pa=nominal_maximum,
+        maximum_uncertainty_overpressure_pa=nominal_maximum,
+        classification="UNKNOWN",
+        operational_constraints_checked=(
+            "exact OpenSky baseline geometry",
+            "route/time-matched NOAA column in every selected region",
+            "available route-aligned USGS 3DEP terrain",
+            "height changes applied only to regions above the nominal research threshold",
+        ),
+        limitations=(
+            *baseline.limitations,
+            "adaptive profile uses only the available discrete height sensitivities",
+            "baseline near-field signatures remain fixed at changed heights",
+            "vertical transitions, aircraft performance, fuel, and ride constraints are not solved",
+            "adaptive profile is not a cleared flight path or compliant corridor",
+        ),
+    )
+
+
 class OpenResearchRouteSolver:
     """Compute unvalidated primary-ray route estimates from public equations and real inputs."""
 
     name = "machlane-open-primary"
-    version = "0.3.0-unvalidated"
+    version = "0.4.0-unvalidated"
 
     def run(self, request: dict[str, Any]) -> PhysicalRouteAnalysis:
         if request.get("schema") != "machlane-route-solver-request-v1":
@@ -337,6 +427,13 @@ class OpenResearchRouteSolver:
                 except ResearchSolverUnavailableError:
                     continue
                 candidates.append(sensitivity)
+            adaptive_candidate = _adaptive_height_candidate(
+                candidates,
+                boom_limit_pa=boom_limit_pa,
+                requested_families=requested_families,
+            )
+            if adaptive_candidate is not None:
+                candidates.append(adaptive_candidate)
         source_checksums: dict[str, str] = {}
         workbook_checksum = request["aircraft"].get("workbook_checksum")
         if workbook_checksum:

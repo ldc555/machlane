@@ -213,6 +213,11 @@ the threshold. The baseline near-field signature is deliberately held fixed, so 
 sensitivity—not an aircraft-performance check, cleared altitude, route recommendation, or compliant
 operating corridor.
 
+MachLane also builds an adaptive height profile for that specific route. Each supersonic atmospheric
+region keeps its baseline height unless its nominal primary-ray estimate exceeds the research
+threshold; affected regions select the lowest-pressure available discrete height case. The scenario
+selector updates the map, live altitude, region-level surface pressure, waveforms, and exports.
+
 The current FAA NPRM value of 0.11 psf is treated as a research screening threshold, not a final
 approval. A route is never recommended from nominal overpressure alone: all three requested ray
 families must complete, the uncertainty upper bound must remain within the threshold, and the
