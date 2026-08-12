@@ -253,9 +253,7 @@ def _available_observed_flights(
             latest_by_day[flight_date] = flight
     return tuple(
         flight.model_dump_json()
-        for flight in sorted(
-            latest_by_day.values(), key=lambda item: item.first_seen, reverse=True
-        )
+        for flight in sorted(latest_by_day.values(), key=lambda item: item.first_seen, reverse=True)
     )
 
 
@@ -621,9 +619,7 @@ if credentials_configured:
     except (RuntimeError, ValueError, OSError) as exc:
         discovery_error = str(exc)
 
-available_by_id = {
-    flight.flight_id: flight for flight in (*network_flights, *cached_flights)
-}
+available_by_id = {flight.flight_id: flight for flight in (*network_flights, *cached_flights)}
 available_flights = tuple(
     sorted(available_by_id.values(), key=lambda item: item.first_seen, reverse=True)
 )
@@ -851,9 +847,7 @@ for index, point in enumerate(ascent_points):
     phase_progress[point.sequence] = climb_end_progress * index / max(1, len(ascent_points) - 1)
 cruise_scene = selected_aircraft.phase_profile[cruise_profile_index]
 phase_progress[cruise_scene.sequence] = cruise_mid_progress
-descent_points = selected_aircraft.phase_profile[
-    cruise_profile_index + 1 : approach_profile_index
-]
+descent_points = selected_aircraft.phase_profile[cruise_profile_index + 1 : approach_profile_index]
 for index, point in enumerate(descent_points, start=1):
     phase_progress[point.sequence] = cruise_end_progress + (
         descent_end_progress - cruise_end_progress
@@ -981,12 +975,12 @@ st.markdown(
 
 display_candidate = None
 research_suggestion = None
+adaptive_route_candidate = None
 baseline_primary_exceeds = False
 selected_altitude_offsets_by_segment: dict[str, float] = {}
 if physical_result is not None:
     baseline_primary_exceeds = (
-        physical_result.baseline.maximum_nominal_overpressure_pa
-        > physical_result.boom_limit_pa
+        physical_result.baseline.maximum_nominal_overpressure_pa > physical_result.boom_limit_pa
     )
     alternative_candidates = [
         candidate
@@ -1024,15 +1018,85 @@ if physical_result is not None:
         ),
     )
     display_candidate = candidate_by_id[selected_scenario_id]
+    adaptive_route_candidate = next(
+        (
+            candidate
+            for candidate in physical_result.candidates
+            if _candidate_altitude_profile(candidate)
+        ),
+        None,
+    )
     selected_profile = _candidate_altitude_profile(display_candidate)
     if selected_profile:
         selected_altitude_offsets_by_segment = dict(selected_profile)
     else:
         uniform_offset = _candidate_altitude_offset(display_candidate)
         selected_altitude_offsets_by_segment = {
-            sample.segment_id: uniform_offset
-            for sample in display_candidate.surface_samples
+            sample.segment_id: uniform_offset for sample in display_candidate.surface_samples
         }
+
+region_by_id = {str(row["region"]): row for row in rows}
+weighted_altitudes = [
+    (
+        float(region["planned_state"]["altitude_ft"])
+        + selected_altitude_offsets_by_segment.get(str(region["segment"]["segment_id"]), 0.0),
+        float(region["segment"]["distance_m"]),
+    )
+    for region in physical_request["regions"]
+]
+scenario_median_altitude_ft: float | None = None
+if weighted_altitudes:
+    midpoint_weight = sum(weight for _, weight in weighted_altitudes) / 2
+    cumulative_weight = 0.0
+    for altitude, weight in sorted(weighted_altitudes):
+        cumulative_weight += weight
+        if cumulative_weight >= midpoint_weight:
+            scenario_median_altitude_ft = altitude
+            break
+
+adaptive_change_rows: list[dict[str, Any]] = []
+if physical_result is not None and adaptive_route_candidate is not None:
+    baseline_peaks_by_segment: dict[str, float] = {}
+    adjusted_peaks_by_segment: dict[str, float] = {}
+    for sample in physical_result.baseline.surface_samples:
+        baseline_peaks_by_segment[sample.segment_id] = max(
+            baseline_peaks_by_segment.get(sample.segment_id, 0.0),
+            sample.peak_positive_overpressure_pa / PASCALS_PER_PSF,
+        )
+    for sample in adaptive_route_candidate.surface_samples:
+        adjusted_peaks_by_segment[sample.segment_id] = max(
+            adjusted_peaks_by_segment.get(sample.segment_id, 0.0),
+            sample.peak_positive_overpressure_pa / PASCALS_PER_PSF,
+        )
+    for segment_id, altitude_offset in _candidate_altitude_profile(adaptive_route_candidate):
+        if altitude_offset == 0 or segment_id not in region_by_id:
+            continue
+        region = region_by_id[segment_id]
+        baseline_peak = baseline_peaks_by_segment.get(segment_id)
+        adjusted_peak = adjusted_peaks_by_segment.get(segment_id)
+        adaptive_change_rows.append(
+            {
+                "region": segment_id,
+                "path": region["path"],
+                "start_mi": region["start_mi"],
+                "end_mi": region["end_mi"],
+                "length_mi": region["length_mi"],
+                "altitude_change_ft": altitude_offset,
+                "baseline_psf": baseline_peak,
+                "adjusted_psf": adjusted_peak,
+                "pressure_inhg": region["pressure_inhg"],
+                "temperature_f": region["temperature_f"],
+                "wind_kt": region["wind_kt"],
+                "terrain": region["terrain"],
+                "reason": (
+                    f"Baseline primary-ray estimate {baseline_peak:.3f} psf exceeded "
+                    f"{physical_result.boom_limit_pa / PASCALS_PER_PSF:.2f} psf; "
+                    f"{altitude_offset:+,.0f} ft recalculated to {adjusted_peak:.3f} psf."
+                    if baseline_peak is not None and adjusted_peak is not None
+                    else "Changed because this region exceeded the nominal research trigger."
+                ),
+            }
+        )
 
 summary = st.columns(5)
 summary[0].metric(
@@ -1102,9 +1166,13 @@ plan_summary[2].metric(
     delta_color="off",
 )
 plan_summary[3].metric(
-    "Supersonic cruise",
-    f"{flight_plan.cruise_distance_miles:,.0f} mi",
-    f"{flight_plan.cruise_time_min:.0f} min · research scenario",
+    "Flight-path median altitude",
+    (
+        "Not calculated"
+        if scenario_median_altitude_ft is None
+        else f"{scenario_median_altitude_ft:,.0f} ft"
+    ),
+    f"{flight_plan.cruise_distance_miles:,.0f} mi supersonic cruise",
     delta_color="off",
 )
 
@@ -1113,7 +1181,7 @@ ground_result_text = (
     if physical_result is None
     else (
         f'<span class="pending">INTERSECTS TERRAIN</span><br/>{len((display_candidate or physical_result.baseline).surface_samples)} primary-ray receiver samples · '
-        f'{(display_candidate or physical_result.baseline).maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal maximum for the selected scenario.'
+        f"{(display_candidate or physical_result.baseline).maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal maximum for the selected scenario."
     )
 )
 mitigation_text = '<span class="pending">NOT TRIGGERED</span><br/>Run the physical analysis first.'
@@ -1121,23 +1189,22 @@ if physical_result is not None:
     if not baseline_primary_exceeds:
         mitigation_text = (
             '<span class="pending">NO CHANGE GENERATED</span><br/>'
-            'Nominal primary-ray estimate does not exceed the research threshold. This is not a no-boom or compliance finding.'
+            "Nominal primary-ray estimate does not exceed the research threshold. This is not a no-boom or compliance finding."
         )
     elif research_suggestion is not None:
         sensitivity_threshold_text = (
             "below the nominal research threshold"
-            if research_suggestion.maximum_nominal_overpressure_pa
-            <= physical_result.boom_limit_pa
+            if research_suggestion.maximum_nominal_overpressure_pa <= physical_result.boom_limit_pa
             else "still above the nominal research threshold"
         )
         mitigation_text = (
             f'<span class="pending">ROUTE-SPECIFIC OPTION</span><br/>{_candidate_adjustment_text(research_suggestion).capitalize()} lowers the nominal primary-ray maximum to '
-            f'{research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf ({sensitivity_threshold_text}) with the source signature held fixed.'
+            f"{research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf ({sensitivity_threshold_text}) with the source signature held fixed."
         )
     else:
         mitigation_text = (
             '<span class="pending">NO SUPPORTED OPTION</span><br/>'
-            'The baseline nominal primary-ray estimate exceeds the research threshold, but no calculated height sensitivity improved it.'
+            "The baseline nominal primary-ray estimate exceeds the research threshold, but no calculated height sensitivity improved it."
         )
 
 physical_corridor_text = (
@@ -1162,7 +1229,7 @@ physical_corridor_text = (
 st.markdown(
     f"""
 <div class="layer-grid">
-  <div class="layer"><b>1 · Planned flight</b><span>{selected_aircraft.value('Aircraft Name') or selected_aircraft.display_name} phase profile applied to the real OpenSky baseline geometry · {flight_plan.block_time_min / 60:.2f} hr estimated block time.</span></div>
+  <div class="layer"><b>1 · Planned flight</b><span>{selected_aircraft.value("Aircraft Name") or selected_aircraft.display_name} phase profile applied to the real OpenSky baseline geometry · {flight_plan.block_time_min / 60:.2f} hr estimated block time.</span></div>
   <div class="layer"><b>2 · Primary-ray ground result</b><span>{ground_result_text}</span></div>
   <div class="layer"><b>3 · Proposed flight-path adjustment</b><span>{mitigation_text}</span></div>
   <div class="layer"><b>4 · Compliant operating corridor</b><span>{physical_corridor_text}</span></div>
@@ -1179,9 +1246,8 @@ with alert_left:
         )
     elif physical_result.solver.validation_status != "VALIDATED":
         selected_primary_exceeds = (
-            (display_candidate or physical_result.baseline).maximum_nominal_overpressure_pa
-            > physical_result.boom_limit_pa
-        )
+            display_candidate or physical_result.baseline
+        ).maximum_nominal_overpressure_pa > physical_result.boom_limit_pa
         selected_label = _candidate_scenario_label(
             display_candidate or physical_result.baseline,
             physical_result.baseline_candidate_id,
@@ -1227,9 +1293,7 @@ with alert_right:
     if research_suggestion is not None:
         st.metric(
             "Best route-specific option",
-            _candidate_scenario_label(
-                research_suggestion, physical_result.baseline_candidate_id
-            ),
+            _candidate_scenario_label(research_suggestion, physical_result.baseline_candidate_id),
             f"{research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF:.3f} psf nominal",
             delta_color="off",
         )
@@ -1237,7 +1301,9 @@ with alert_right:
         adjustment_state = (
             "Not calculated"
             if physical_result is None
-            else "No improving option" if baseline_primary_exceeds else "Not triggered"
+            else "No improving option"
+            if baseline_primary_exceeds
+            else "Not triggered"
         )
         st.metric(
             "Flight-path adjustment",
@@ -1338,7 +1404,20 @@ label_layer = pdk.Layer(
 
 physical_footprint_layer = None
 suggested_route_layer = None
+adaptive_height_corridor_layer = None
 selected_surface_by_segment: dict[str, list[dict[str, Any]]] = {}
+if adaptive_change_rows:
+    adaptive_height_corridor_layer = pdk.Layer(
+        "PathLayer",
+        adaptive_change_rows,
+        id="adaptive-height-research-corridor",
+        get_path="path",
+        get_color=[45, 240, 207, 225],
+        get_width=9,
+        width_units="pixels",
+        width_min_pixels=7,
+        pickable=True,
+    )
 if physical_result is not None:
     physical_points = []
     limit_pa = physical_result.boom_limit_pa
@@ -1365,20 +1444,12 @@ if physical_result is not None:
             "color": (
                 [35, 220, 180, 120]
                 if compliant
-                else (
-                    [255, 71, 102, 145]
-                    if result_is_validated
-                    else [156, 92, 255, 115]
-                )
+                else ([255, 71, 102, 145] if result_is_validated else [156, 92, 255, 115])
             ),
             "edge": (
                 [106, 255, 220, 245]
                 if compliant
-                else (
-                    [255, 173, 187, 255]
-                    if result_is_validated
-                    else [205, 176, 255, 245]
-                )
+                else ([255, 173, 187, 255] if result_is_validated else [205, 176, 255, 245])
             ),
         }
         physical_points.append(row)
@@ -1458,7 +1529,7 @@ def render_workspace() -> None:
         st.markdown(
             f'<div class="phase-readout"><span>{percent:05.1f}% · REGION {active_row["region"]}</span><b>{phase_label} · Mach {mach:.2f} · {altitude_ft:,.0f} ft'
             + (
-                f' · {scenario_altitude_offset_ft:+,.0f} ft scenario'
+                f" · {scenario_altitude_offset_ft:+,.0f} ft scenario"
                 if scenario_altitude_offset_ft
                 else ""
             )
@@ -1488,7 +1559,7 @@ def render_workspace() -> None:
                 help="Show or hide NOAA-derived atmospheric regions. This does not hide the OpenSky route.",
             )
         st.markdown(
-            '<div class="zone-legend">Yellow = exact OpenSky baseline. Blue → red route bands = ambient pressure only. Purple surface points are unvalidated primary-ray research estimates; they are not safe/unsafe classifications. The cyan path appears only for a validated, uncertainty-bounded variation.</div>',
+            '<div class="zone-legend">Yellow = exact OpenSky baseline. Blue → red route bands = ambient pressure only. Purple points = selected primary-ray research estimate. Cyan route sections = adaptive height changes, not a compliant corridor.</div>',
             unsafe_allow_html=True,
         )
         aircraft_layer = pdk.Layer(
@@ -1509,12 +1580,13 @@ def render_workspace() -> None:
             pdk.Deck(
                 layers=[
                     *(atmosphere_layers if show_pressure_zones else []),
+                    *([physical_footprint_layer] if physical_footprint_layer is not None else []),
+                    observed_layer,
                     *(
-                        [physical_footprint_layer]
-                        if physical_footprint_layer is not None
+                        [adaptive_height_corridor_layer]
+                        if adaptive_height_corridor_layer is not None
                         else []
                     ),
-                    observed_layer,
                     *(
                         [suggested_route_layer]
                         if show_suggested_variation and suggested_route_layer is not None
@@ -1531,7 +1603,7 @@ def render_workspace() -> None:
                     pitch=8,
                 ),
                 tooltip={
-                    "html": "<b>{region}{segment_id}</b><br/>{ray_family}<br/>Ambient {pressure_inhg} inHg<br/>Surface peak {peak_psf} psf<br/>Upper bound {upper_psf} psf<br/>{boundary_reason}",
+                    "html": "<b>{region}{segment_id}</b><br/>{ray_family}<br/>Height change {altitude_change_ft} ft<br/>Ambient {pressure_inhg} inHg<br/>Baseline {baseline_psf} psf<br/>Adjusted {adjusted_psf} psf<br/>Surface peak {peak_psf} psf<br/>{reason}{boundary_reason}",
                     "style": {"backgroundColor": "#0b1420", "color": "#e5eef8"},
                 },
             ),
@@ -1600,19 +1672,26 @@ def render_workspace() -> None:
 
 render_workspace()
 
-flight_tab, regions_tab, atmosphere_tab, terrain_tab, boom_tab, provenance_tab, how_tab, evidence_tab = (
-    st.tabs(
-        [
-            "Flight plan",
-            "Atmospheric regions",
-            "Atmosphere",
-            "Terrain",
-            "Sonic boom",
-            "Data provenance",
-            "How it works",
-            "Evidence",
-        ]
-    )
+(
+    flight_tab,
+    regions_tab,
+    atmosphere_tab,
+    terrain_tab,
+    boom_tab,
+    provenance_tab,
+    how_tab,
+    evidence_tab,
+) = st.tabs(
+    [
+        "Flight plan",
+        "Atmospheric regions",
+        "Atmosphere",
+        "Terrain",
+        "Sonic boom",
+        "Data provenance",
+        "How it works",
+        "Evidence",
+    ]
 )
 
 with flight_tab:
@@ -1827,9 +1906,7 @@ with boom_tab:
     else:
         baseline = physical_result.baseline
         selected_candidate = display_candidate or baseline
-        selected_psf = (
-            selected_candidate.maximum_nominal_overpressure_pa / PASCALS_PER_PSF
-        )
+        selected_psf = selected_candidate.maximum_nominal_overpressure_pa / PASCALS_PER_PSF
         threshold_psf = physical_result.boom_limit_pa / PASCALS_PER_PSF
         selected_label = _candidate_scenario_label(
             selected_candidate, physical_result.baseline_candidate_id
@@ -1839,13 +1916,11 @@ with boom_tab:
                 f"GROUND BOOM WARNING · {selected_label} intersects terrain at {selected_psf:.3f} psf nominal, above the {threshold_psf:.2f} psf research threshold."
             )
             if (
-                selected_candidate.candidate_id
-                == physical_result.baseline_candidate_id
+                selected_candidate.candidate_id == physical_result.baseline_candidate_id
                 and research_suggestion is not None
             ):
                 suggested_psf = (
-                    research_suggestion.maximum_nominal_overpressure_pa
-                    / PASCALS_PER_PSF
+                    research_suggestion.maximum_nominal_overpressure_pa / PASCALS_PER_PSF
                 )
                 st.warning(
                     f"PROPOSED FLIGHT-PATH ADJUSTMENT · Select {_candidate_scenario_label(research_suggestion, physical_result.baseline_candidate_id)}. "
@@ -1865,9 +1940,35 @@ with boom_tab:
             st.success(
                 f"PRIMARY-RAY SCREEN · {selected_label} intersects terrain at {selected_psf:.3f} psf nominal, below the {threshold_psf:.2f} psf research threshold. This is not a no-boom or compliance finding."
             )
+        if adaptive_change_rows:
+            st.markdown("##### Where the adaptive flight path changes height")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Region": row["region"],
+                            "Route miles": f"{row['start_mi']:,.0f}–{row['end_mi']:,.0f}",
+                            "Length (mi)": round(float(row["length_mi"]), 1),
+                            "Height change (ft)": row["altitude_change_ft"],
+                            "Baseline (psf)": row["baseline_psf"],
+                            "Adjusted (psf)": row["adjusted_psf"],
+                            "Why": row["reason"],
+                            "NOAA pressure (inHg)": round(float(row["pressure_inhg"]), 3),
+                            "Temperature (°F)": round(float(row["temperature_f"]), 1),
+                            "Wind (kt)": round(float(row["wind_kt"]), 1),
+                            "Terrain": row["terrain"],
+                        }
+                        for row in adaptive_change_rows
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+            st.caption(
+                "The cyan map sections are this route's research height-change corridor. Regions not listed keep the baseline flight height."
+            )
         result_has_uncertainty = all(
-            sample.uncertainty_upper_pa is not None
-            for sample in selected_candidate.surface_samples
+            sample.uncertainty_upper_pa is not None for sample in selected_candidate.surface_samples
         )
         result_cards = st.columns(5)
         result_cards[0].metric(
@@ -1906,10 +2007,10 @@ with boom_tab:
                     "Maximum offset (nmi)": candidate.maximum_lateral_offset_m / 1852,
                     "Altitude change (ft)": _candidate_altitude_offset(candidate),
                     "Adaptive regions": sum(
-                        offset != 0
-                        for _, offset in _candidate_altitude_profile(candidate)
+                        offset != 0 for _, offset in _candidate_altitude_profile(candidate)
                     ),
-                    "Nominal max (psf)": candidate.maximum_nominal_overpressure_pa / PASCALS_PER_PSF,
+                    "Nominal max (psf)": candidate.maximum_nominal_overpressure_pa
+                    / PASCALS_PER_PSF,
                     "Upper max (psf)": (
                         candidate.maximum_uncertainty_overpressure_pa / PASCALS_PER_PSF
                         if all(
@@ -2020,7 +2121,9 @@ with boom_tab:
             ("SECONDARY_DIRECT", "#ffd447"),
             ("SECONDARY_INDIRECT", "#ff5b79"),
         ):
-            family_samples = [sample for sample in physical_profile if sample.ray_family == ray_family]
+            family_samples = [
+                sample for sample in physical_profile if sample.ray_family == ray_family
+            ]
             if not family_samples:
                 continue
             family_by_distance: dict[float, Any] = {}
@@ -2028,8 +2131,7 @@ with boom_tab:
                 current = family_by_distance.get(sample.along_track_m)
                 if (
                     current is None
-                    or sample.peak_positive_overpressure_pa
-                    > current.peak_positive_overpressure_pa
+                    or sample.peak_positive_overpressure_pa > current.peak_positive_overpressure_pa
                 ):
                     family_by_distance[sample.along_track_m] = sample
             family_envelope = [family_by_distance[key] for key in sorted(family_by_distance)]
@@ -2041,7 +2143,8 @@ with boom_tab:
                             sample.uncertainty_upper_pa
                             if sample.uncertainty_upper_pa is not None
                             else sample.peak_positive_overpressure_pa
-                        ) / PASCALS_PER_PSF
+                        )
+                        / PASCALS_PER_PSF
                         for sample in family_envelope
                     ],
                     mode="lines+markers",
@@ -2051,7 +2154,9 @@ with boom_tab:
                 secondary_y=False,
             )
         terrain_samples = sorted(
-            {sample.along_track_m: sample.terrain_elevation_m for sample in physical_profile}.items()
+            {
+                sample.along_track_m: sample.terrain_elevation_m for sample in physical_profile
+            }.items()
         )
         profile_figure.add_trace(
             go.Scatter(
@@ -2098,7 +2203,9 @@ with boom_tab:
             f"{sample.segment_id} · {_roll_label(sample.launch_roll_deg)} · {sample.cross_track_m / 1852:+.1f} nmi": sample
             for sample in physical_profile
         }
-        waveform_label = st.selectbox("Ground waveform", list(waveform_options), key="ground_waveform")
+        waveform_label = st.selectbox(
+            "Ground waveform", list(waveform_options), key="ground_waveform"
+        )
         waveform = waveform_options[waveform_label]
         waveform_figure = go.Figure()
         reflection_factor = waveform.reflection_factor or 1.0
@@ -2236,7 +2343,9 @@ with boom_tab:
                                 (
                                     "#2df0cf"
                                     if candidate_id == best_uniform_id
-                                    else "#ffd447" if candidate_id == "baseline" else "#ff7b8f"
+                                    else "#ffd447"
+                                    if candidate_id == "baseline"
+                                    else "#ff7b8f"
                                 )
                                 for candidate_id in sensitivity_frame["ID"]
                             ],
@@ -2298,6 +2407,7 @@ with boom_tab:
             None,
         )
         if adaptive_candidate is not None:
+
             def _segment_plot_rows(candidate: Any) -> list[tuple[float, float, float]]:
                 grouped: dict[str, list[Any]] = {}
                 for sample in candidate.surface_samples:
