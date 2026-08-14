@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -98,6 +99,7 @@ class TimeAlignedNOAAProvider:
         *,
         cache_dir: str | Path,
         network_enabled: bool,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> None:
         if route.source is None or route.source.data_kind != "observed_track":
             raise ValueError("time-aligned NOAA requires an observed OpenSky route")
@@ -109,6 +111,7 @@ class TimeAlignedNOAAProvider:
         )
         self.cache_dir = Path(cache_dir)
         self.network_enabled = network_enabled
+        self.progress_callback = progress_callback
         self._providers: dict[NOAAAtmospherePlan, HerbieHRRRProvider | HerbieGEFSProvider] = {}
         self._plans_used: set[NOAAAtmospherePlan] = set()
 
@@ -145,11 +148,18 @@ class TimeAlignedNOAAProvider:
             plan = noaa_request_for_time(sample_time, self.model)
             grouped.setdefault(plan, []).append(index)
         output: list[AtmosphericProfile | None] = [None] * len(points)
-        for plan, indices in grouped.items():
+        total_groups = len(grouped)
+        for completed_groups, (plan, indices) in enumerate(grouped.items(), start=1):
             selected_points = [points[index] for index in indices]
             profiles = self._provider(plan).profiles(selected_points, plan.valid_time)
             for index, profile in zip(indices, profiles, strict=True):
                 output[index] = profile
+            if self.progress_callback is not None:
+                self.progress_callback(
+                    completed_groups,
+                    total_groups,
+                    f"NOAA {plan.model} {plan.valid_time:%H:%M UTC}",
+                )
         if any(profile is None for profile in output):
             raise RuntimeError("NOAA returned an incomplete route-time atmosphere")
         return tuple(profile for profile in output if profile is not None)
@@ -198,6 +208,7 @@ def build_time_aligned_noaa_provider(
     *,
     cache_dir: str | Path,
     network_enabled: bool,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> TimeAlignedNOAAProvider:
     """Build the NOAA coordinator used by the production mission workspace."""
 
@@ -206,4 +217,5 @@ def build_time_aligned_noaa_provider(
         domain,
         cache_dir=cache_dir,
         network_enabled=network_enabled,
+        progress_callback=progress_callback,
     )

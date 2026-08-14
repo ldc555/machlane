@@ -150,12 +150,14 @@ def _patch_real_sources(monkeypatch, *, fail_longitude: float | None = None) -> 
 
 def test_real_mission_coordinator_aligns_times_and_loads_terrain(tmp_path, monkeypatch) -> None:
     _patch_real_sources(monkeypatch)
+    progress: list[tuple[int, str]] = []
 
     analysis = build_real_mission_analysis(
         _observed_route(),
         "conus",
         weather_cache_dir=tmp_path / "weather",
         terrain_cache_dir=tmp_path / "terrain",
+        progress_callback=lambda percent, label: progress.append((percent, label)),
     )
 
     assert analysis.noaa_model == "HRRR"
@@ -168,6 +170,12 @@ def test_real_mission_coordinator_aligns_times_and_loads_terrain(tmp_path, monke
         for item in analysis.terrain_regions
     )
     assert all(item.policy_version == analysis.policy_version for item in analysis.weather_regimes)
+    assert progress[0] == (2, "Preparing the exact OpenSky route")
+    assert progress[-1] == (100, "Real route inputs ready")
+    assert all(
+        current[0] <= following[0]
+        for current, following in zip(progress, progress[1:], strict=False)
+    )
 
 
 def test_real_mission_coordinator_records_terrain_outage_without_fallback(

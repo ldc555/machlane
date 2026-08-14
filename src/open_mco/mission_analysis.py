@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -125,6 +126,7 @@ def build_real_mission_analysis(
     weather_cache_dir: str | Path,
     terrain_cache_dir: str | Path,
     network_enabled: bool = True,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> RealMissionAnalysis:
     """Load timestamp-aligned NOAA and available 3DEP data for one OpenSky track.
 
@@ -133,6 +135,11 @@ def build_real_mission_analysis(
     sampled. No atmosphere, route, terrain, aircraft, or propagation fallback is created.
     """
 
+    def report(percent: int, label: str) -> None:
+        if progress_callback is not None:
+            progress_callback(percent, label)
+
+    report(2, "Preparing the exact OpenSky route")
     source = observed_route.source
     if source is None or source.provider != "opensky" or source.data_kind != "observed_track":
         raise ValueError("real mission analysis requires a normalized OpenSky observed track")
@@ -151,11 +158,15 @@ def build_real_mission_analysis(
         AUTOMATIC_WEATHER_SAMPLE_SPACING_M,
     )
     route_times = weather_sample_times(sampled_route)
+    report(8, "Planning archived NOAA requests")
     noaa = build_time_aligned_noaa_provider(
         observed_route,
         domain,
         cache_dir=weather_cache_dir,
         network_enabled=network_enabled,
+        progress_callback=lambda complete, total, label: report(
+            10 + round(43 * complete / max(1, total)), label
+        ),
     )
     atmospheric_route, regimes = segment_route_by_weather(
         sampled_route,
@@ -163,12 +174,17 @@ def build_real_mission_analysis(
         settings=AUTOMATIC_WEATHER_SETTINGS,
         sample_times=route_times,
     )
+    report(55, f"Formed {len(atmospheric_route.segments)} atmospheric regions")
 
     region_points = [
         interpolate_segment_position(segment) for segment in atmospheric_route.segments
     ]
     region_times = _region_sample_times(atmospheric_route)
+    noaa.progress_callback = lambda complete, total, label: report(
+        55 + round(14 * complete / max(1, total)), label
+    )
     segment_atmospheres = profiles_at_spacetime(noaa, region_points, region_times)
+    report(70, "NOAA columns matched; loading 3DEP terrain")
 
     terrain_provider = USGS3DEPProvider(
         network_enabled=network_enabled,
@@ -191,7 +207,8 @@ def build_real_mission_analysis(
                 )
                 continue
             terrain_requests[executor.submit(terrain_provider.profile, segment)] = (index, segment)
-        for future in as_completed(terrain_requests):
+        total_terrain_requests = len(terrain_requests)
+        for completed_terrain, future in enumerate(as_completed(terrain_requests), start=1):
             index, segment = terrain_requests[future]
             try:
                 profile = future.result()
@@ -209,9 +226,14 @@ def build_real_mission_analysis(
                     profile=profile,
                     reason="Real USGS 3DEP sparse availability preview loaded",
                 )
+            report(
+                70 + round(28 * completed_terrain / max(1, total_terrain_requests)),
+                f"3DEP terrain {completed_terrain}/{total_terrain_requests}",
+            )
     if any(result is None for result in terrain_regions):
         raise RuntimeError("terrain availability sampling returned an incomplete region set")
 
+    report(100, "Real route inputs ready")
     return RealMissionAnalysis(
         observed_route=observed_route,
         atmospheric_route=atmospheric_route,
