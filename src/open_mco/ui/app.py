@@ -129,7 +129,205 @@ def _candidate_scenario_label(candidate: Any, baseline_id: str) -> str:
     return f"{_candidate_altitude_offset(candidate):+,.0f} ft"
 
 
-@st.cache_resource(show_spinner=False)
+@fragment
+def render_boom_risk_inspector(
+    risk_rows: list[dict[str, Any]],
+    threshold_psf: float,
+    state_key: str,
+    candidate_id: str,
+) -> None:
+    """Inspect one boom-risk region without rerunning the mission workspace."""
+
+    if not risk_rows:
+        st.success(
+            f"No modeled region exceeds {threshold_psf:.2f} psf nominal. "
+            "The 1.50× screening margin is provisional and does not replace "
+            "secondary-ray or validation evidence."
+        )
+        return
+
+    selected_region_id = st.selectbox(
+        "Boom-risk location",
+        [str(row["region"]) for row in risk_rows],
+        format_func=lambda region_id: next(
+            f"{row['region']} · route mi {row['start_mi']:,.0f}–{row['end_mi']:,.0f}"
+            for row in risk_rows
+            if row["region"] == region_id
+        ),
+        key=f"boom-risk-region:{state_key}:{candidate_id}",
+    )
+    selected_risk = next(row for row in risk_rows if row["region"] == selected_region_id)
+    action_cards = st.columns(4)
+    action_cards[0].metric(
+        "Location",
+        selected_risk["region"],
+        f"mi {selected_risk['start_mi']:,.0f}–{selected_risk['end_mi']:,.0f}",
+        delta_color="off",
+    )
+    action_cards[1].metric(
+        "Baseline height",
+        f"{selected_risk['baseline_altitude_ft']:,.0f} ft",
+        f"{selected_risk['baseline_psf']:.3f} psf nominal",
+        delta_color="off",
+    )
+    action_cards[2].metric(
+        "Tested height",
+        f"{selected_risk['suggested_altitude_ft']:,.0f} ft",
+        f"{selected_risk['altitude_change_ft']:+,.0f} ft",
+        delta_color="off",
+    )
+    action_cards[3].metric(
+        "Recalculated surface",
+        f"{selected_risk['adjusted_psf']:.3f} psf",
+        f"screen {selected_risk['screening_upper_psf']:.3f} psf",
+        delta_color="off",
+    )
+    if selected_risk["screening_upper_psf"] <= threshold_psf:
+        st.success(
+            f"PROPOSED RESEARCH CORRECTION · {selected_risk['action']}. "
+            "The conservative screening envelope is below the research threshold. "
+            "Validate performance, secondary rays, and the new near-field operating "
+            "point before use."
+        )
+    else:
+        st.warning(
+            f"NO TESTED SUPERSONIC HEIGHT CLEARS THIS REGION · "
+            f"{selected_risk['action']}. A lateral reroute or departure-time change "
+            "requires fresh NOAA and terrain sampling and is not invented from the "
+            "current route."
+        )
+    st.caption(str(selected_risk["reason"]))
+
+
+@fragment
+def render_ground_waveform_inspector(physical_profile: list[Any], state_key: str) -> None:
+    """Switch ground waveforms without replaying route or weather analysis."""
+
+    waveform_options = {
+        f"{sample.segment_id} · {_roll_label(sample.launch_roll_deg)} · "
+        f"{sample.cross_track_m / 1852:+.1f} nmi": sample
+        for sample in physical_profile
+    }
+    waveform_label = st.selectbox(
+        "Ground waveform",
+        list(waveform_options),
+        key=f"ground-waveform:{state_key}",
+    )
+    waveform = waveform_options[waveform_label]
+    waveform_figure = go.Figure()
+    reflection_factor = waveform.reflection_factor or 1.0
+    waveform_figure.add_trace(
+        go.Scatter(
+            x=[value * 1_000 for value in waveform.time_s],
+            y=[value / reflection_factor / PASCALS_PER_PSF for value in waveform.overpressure_pa],
+            mode="lines",
+            name="Incident at terrain",
+            line={"color": "#8fb9d9", "width": 1.8, "dash": "dot"},
+        )
+    )
+    waveform_figure.add_trace(
+        go.Scatter(
+            x=[value * 1_000 for value in waveform.time_s],
+            y=[value / PASCALS_PER_PSF for value in waveform.overpressure_pa],
+            mode="lines",
+            name=f"Ground pressure · rigid factor {reflection_factor:.1f}",
+            line={"color": "#30d5ff", "width": 2.8},
+        )
+    )
+    waveform_figure.add_hline(y=0, line_color="#8fa6b8")
+    waveform_figure.update_layout(
+        title=(
+            "Incident and rigid-ground waveform · "
+            f"{waveform.segment_id} · {_roll_label(waveform.launch_roll_deg)}"
+        ),
+        xaxis_title="Time (ms)",
+        yaxis_title="Surface overpressure (psf)",
+        template="plotly_dark",
+        height=390,
+        paper_bgcolor="#081524",
+        plot_bgcolor="#081524",
+        font={"color": "#e9f2ff"},
+        title_font={"color": "#ffffff", "size": 18},
+    )
+    ray_figure = go.Figure()
+    if waveform.ray_path_horizontal_m and waveform.ray_path_altitude_m:
+        ray_x_nmi = [value / 1852 for value in waveform.ray_path_horizontal_m]
+        ray_y_ft = [value * METERS_TO_FEET for value in waveform.ray_path_altitude_m]
+        ray_figure.add_trace(
+            go.Scatter(
+                x=ray_x_nmi,
+                y=ray_y_ft,
+                mode="lines",
+                name="Incident primary ray",
+                line={"color": "#30d5ff", "width": 3},
+            )
+        )
+        ground_ft = waveform.terrain_elevation_m * METERS_TO_FEET
+        receiver_nmi = ray_x_nmi[-1]
+        reflected_horizontal_nmi = max(receiver_nmi * 0.22, 1.0)
+        incidence_deg = waveform.ground_incidence_deg or 0.0
+        reflected_altitude_ft = (
+            reflected_horizontal_nmi
+            * 1852
+            / max(math.tan(math.radians(incidence_deg)), 1e-6)
+            * METERS_TO_FEET
+        )
+        reflected_altitude_ft = min(
+            reflected_altitude_ft,
+            max(ray_y_ft[0] - ground_ft, 1.0),
+        )
+        ray_figure.add_trace(
+            go.Scatter(
+                x=[receiver_nmi, receiver_nmi + reflected_horizontal_nmi],
+                y=[ground_ft, ground_ft + reflected_altitude_ft],
+                mode="lines",
+                name="Specular reflection geometry",
+                line={"color": "#ffd447", "width": 2.2, "dash": "dash"},
+            )
+        )
+        ray_figure.add_trace(
+            go.Scatter(
+                x=[0, receiver_nmi, receiver_nmi + reflected_horizontal_nmi],
+                y=[ground_ft, ground_ft, ground_ft],
+                mode="lines",
+                name="Local 3DEP terrain plane",
+                fill="tozeroy",
+                line={"color": "#8fa6b8", "width": 1.5},
+                opacity=0.5,
+            )
+        )
+        ray_figure.add_trace(
+            go.Scatter(
+                x=[0, receiver_nmi],
+                y=[ray_y_ft[0], ground_ft],
+                mode="markers",
+                name="Aircraft / receiver",
+                marker={"size": [11, 12], "color": ["#ffd447", "#ff5b79"]},
+            )
+        )
+    ray_figure.update_layout(
+        title="Ray–terrain intersection and reflection geometry",
+        xaxis_title="Horizontal distance from aircraft (nmi)",
+        yaxis_title="Altitude MSL (ft)",
+        template="plotly_dark",
+        height=430,
+        paper_bgcolor="#081524",
+        plot_bgcolor="#081524",
+        font={"color": "#e9f2ff"},
+        title_font={"color": "#ffffff", "size": 18},
+    )
+    visual_left, visual_right = st.columns(2)
+    with visual_left:
+        st.plotly_chart(ray_figure, width="stretch")
+    with visual_right:
+        st.plotly_chart(waveform_figure, width="stretch")
+    st.caption(
+        "The dashed reflected ray is geometric context for the declared rigid-ground "
+        "pressure-doubling assumption. MachLane does not yet model frequency-dependent "
+        "ground impedance, scattering, diffraction, or terrain shadowing."
+    )
+
+
 def _analyze_real_route(
     mission_id: str,
     route_json: str,
@@ -721,47 +919,55 @@ if source is None or source.provider != "opensky" or source.data_kind != "observ
     )
     st.stop()
 
-analysis_progress = st.progress(
-    0,
-    text="0% · Preparing archived NOAA weather and available 3DEP terrain",
+analysis_state_key = (
+    f"real-analysis:{ANALYSIS_CACHE_SCHEMA}:{mission_id}:"
+    f"{hashlib.sha256(route_json.encode()).hexdigest()[:20]}"
 )
-analysis_started = monotonic()
+saved_analysis = st.session_state.get(analysis_state_key)
+if isinstance(saved_analysis, RealMissionAnalysis):
+    analysis = saved_analysis
+else:
+    analysis_progress = st.progress(
+        0,
+        text="0% · Preparing archived NOAA weather and available 3DEP terrain",
+    )
+    analysis_started = monotonic()
 
-
-def _show_analysis_progress(percent: int, label: str) -> None:
-    bounded = max(0, min(100, percent))
-    elapsed = monotonic() - analysis_started
-    remaining_text = "estimating…"
-    if bounded >= 5 and bounded < 100:
-        remaining_seconds = max(0, round(elapsed * (100 - bounded) / bounded))
-        remaining_text = (
-            f"about {remaining_seconds // 60}m {remaining_seconds % 60:02d}s remaining"
-            if remaining_seconds >= 60
-            else f"about {remaining_seconds}s remaining"
+    def _show_analysis_progress(percent: int, label: str) -> None:
+        bounded = max(0, min(100, percent))
+        elapsed = monotonic() - analysis_started
+        remaining_text = "estimating…"
+        if 5 <= bounded < 100:
+            remaining_seconds = max(0, round(elapsed * (100 - bounded) / bounded))
+            remaining_text = (
+                f"about {remaining_seconds // 60}m {remaining_seconds % 60:02d}s remaining"
+                if remaining_seconds >= 60
+                else f"about {remaining_seconds}s remaining"
+            )
+        elif bounded == 100:
+            remaining_text = "complete"
+        analysis_progress.progress(
+            bounded,
+            text=f"{bounded}% · {label} · {remaining_text}",
         )
-    elif bounded == 100:
-        remaining_text = "complete"
-    analysis_progress.progress(
-        bounded,
-        text=f"{bounded}% · {label} · {remaining_text}",
-    )
 
-
-try:
-    analysis = _analyze_real_route(
-        mission_id,
-        route_json,
-        ANALYSIS_CACHE_SCHEMA,
-        _show_analysis_progress,
-    )
-except (RuntimeError, ValueError, OSError) as exc:
+    try:
+        analysis = _analyze_real_route(
+            mission_id,
+            route_json,
+            ANALYSIS_CACHE_SCHEMA,
+            _show_analysis_progress,
+        )
+    except (RuntimeError, ValueError, OSError) as exc:
+        analysis_progress.empty()
+        st.session_state.pop(analysis_state_key, None)
+        st.error(f"NOAA atmosphere unavailable: {exc}")
+        st.info(
+            "Analysis stopped. MachLane did not substitute synthetic weather, a standard atmosphere, or a different route."
+        )
+        st.stop()
+    st.session_state[analysis_state_key] = analysis
     analysis_progress.empty()
-    st.error(f"NOAA atmosphere unavailable: {exc}")
-    st.info(
-        "Analysis stopped. MachLane did not substitute synthetic weather, a standard atmosphere, or a different route."
-    )
-    st.stop()
-analysis_progress.empty()
 
 rows = _region_rows(analysis)
 pressure_values = [float(row["pressure_hpa"]) for row in rows]
@@ -1415,22 +1621,10 @@ label_layer = pdk.Layer(
 )
 
 physical_footprint_layer = None
+affected_area_layer = None
 suggested_route_layer = None
 adaptive_height_corridor_layer = None
-risk_region_layer = None
 selected_surface_by_segment: dict[str, list[dict[str, Any]]] = {}
-if risk_region_rows:
-    risk_region_layer = pdk.Layer(
-        "PathLayer",
-        risk_region_rows,
-        id="boom-risk-regions",
-        get_path="path",
-        get_color=[255, 65, 91, 245],
-        get_width=13,
-        width_units="pixels",
-        width_min_pixels=10,
-        pickable=True,
-    )
 if adaptive_change_rows:
     adaptive_height_corridor_layer = pdk.Layer(
         "PathLayer",
@@ -1465,6 +1659,7 @@ if physical_result is not None:
             "ray_family": sample.ray_family,
             "peak_psf": peak_psf,
             "upper_psf": upper_psf,
+            "screening_psf": max(upper_psf, peak_psf * CONSERVATIVE_SCREENING_MULTIPLIER),
             "terrain_ft": sample.terrain_elevation_m * METERS_TO_FEET,
             "color": (
                 [35, 220, 180, 120]
@@ -1479,6 +1674,31 @@ if physical_result is not None:
         }
         physical_points.append(row)
         selected_surface_by_segment.setdefault(sample.segment_id, []).append(row)
+    affected_points = [
+        {
+            **row,
+            "affected_color": [255, 58, 91, 35],
+            "affected_edge": [255, 104, 128, 115],
+        }
+        for row in physical_points
+        if float(row["screening_psf"]) > FAA_NPRM_RESEARCH_LIMIT_PSF
+    ]
+    if affected_points:
+        affected_area_layer = pdk.Layer(
+            "ScatterplotLayer",
+            affected_points,
+            id="provisional-affected-area",
+            get_position="position",
+            get_radius=8_047,
+            radius_units="meters",
+            radius_min_pixels=9,
+            radius_max_pixels=34,
+            get_fill_color="affected_color",
+            get_line_color="affected_edge",
+            line_width_min_pixels=2,
+            stroked=True,
+            pickable=True,
+        )
     physical_footprint_layer = pdk.Layer(
         "ScatterplotLayer",
         physical_points,
@@ -1572,19 +1792,32 @@ def render_workspace() -> None:
         live[2].metric("Wind speed", f"{weather['wind_speed_kt']:.0f} kt")
         live[3].metric("Along-track wind", f"{weather['along_wind_kt']:+.0f} kt")
 
-        map_title, map_control = st.columns([4, 1], vertical_alignment="bottom")
+        map_title, pressure_control, affected_control = st.columns(
+            [3.4, 1, 1], vertical_alignment="bottom"
+        )
         with map_title:
             st.subheader(
                 f"{mission.origin.iata}–{mission.destination.iata} route and automatic atmospheric regions"
             )
-        with map_control:
+        with pressure_control:
             show_pressure_zones = st.toggle(
                 "Pressure zones",
                 value=True,
                 help="Show or hide NOAA-derived atmospheric regions. This does not hide the OpenSky route.",
             )
+        with affected_control:
+            show_affected_area = st.toggle(
+                "Affected area",
+                value=True,
+                disabled=affected_area_layer is None,
+                help=(
+                    "Show a transparent five-mile screening buffer around calculated "
+                    "primary-ray ground intersections that exceed the provisional screen. "
+                    "It is not a validated lateral footprint."
+                ),
+            )
         st.markdown(
-            '<div class="zone-legend">Yellow = exact OpenSky baseline. Blue → red bands = ambient pressure. Purple points = selected primary-ray result. Thick red route sections = boom-risk screen. Cyan sections = tested adaptive height changes.</div>',
+            '<div class="zone-legend">Yellow = exact OpenSky baseline. Blue → red route bands = ambient pressure only. Purple = modeled primary-ray boom-risk locations. Translucent red = toggleable, provisional five-mile potentially affected-area screen. Cyan = tested adaptive height changes. Neither purple nor red is an FAA-approved footprint.</div>',
             unsafe_allow_html=True,
         )
         aircraft_layer = pdk.Layer(
@@ -1605,6 +1838,11 @@ def render_workspace() -> None:
             pdk.Deck(
                 layers=[
                     *(atmosphere_layers if show_pressure_zones else []),
+                    *(
+                        [affected_area_layer]
+                        if show_affected_area and affected_area_layer is not None
+                        else []
+                    ),
                     *([physical_footprint_layer] if physical_footprint_layer is not None else []),
                     observed_layer,
                     *(
@@ -1612,7 +1850,6 @@ def render_workspace() -> None:
                         if adaptive_height_corridor_layer is not None
                         else []
                     ),
-                    *([risk_region_layer] if risk_region_layer is not None else []),
                     *(
                         [suggested_route_layer]
                         if show_suggested_variation and suggested_route_layer is not None
@@ -1629,7 +1866,7 @@ def render_workspace() -> None:
                     pitch=8,
                 ),
                 tooltip={
-                    "html": "<b>{region}{segment_id}</b><br/>{ray_family}<br/>Height change {altitude_change_ft} ft<br/>Ambient {pressure_inhg} inHg<br/>Baseline {baseline_psf} psf<br/>Adjusted {adjusted_psf} psf<br/>Surface peak {peak_psf} psf<br/>{reason}{boundary_reason}",
+                    "html": "<b>{region}{segment_id}</b><br/>{ray_family}<br/>Height change {altitude_change_ft} ft<br/>Ambient {pressure_inhg} inHg<br/>Baseline {baseline_psf} psf<br/>Adjusted {adjusted_psf} psf<br/>Surface peak {peak_psf} psf<br/>Provisional screen {screening_psf} psf<br/>{reason}{boundary_reason}",
                     "style": {"backgroundColor": "#0b1420", "color": "#e5eef8"},
                 },
             ),
@@ -1944,61 +2181,12 @@ with boom_tab:
         selected_label = _candidate_scenario_label(
             selected_candidate, physical_result.baseline_candidate_id
         )
-        if risk_region_rows:
-            selected_risk_region_id = st.selectbox(
-                "Boom-risk location",
-                [str(row["region"]) for row in risk_region_rows],
-                format_func=lambda region_id: next(
-                    f"{row['region']} · route mi {row['start_mi']:,.0f}–{row['end_mi']:,.0f}"
-                    for row in risk_region_rows
-                    if row["region"] == region_id
-                ),
-                key=f"boom-risk-region:{physical_state_key}:{selected_candidate.candidate_id}",
-            )
-            selected_risk = next(
-                row for row in risk_region_rows if row["region"] == selected_risk_region_id
-            )
-            action_cards = st.columns(4)
-            action_cards[0].metric(
-                "Location",
-                selected_risk["region"],
-                f"mi {selected_risk['start_mi']:,.0f}–{selected_risk['end_mi']:,.0f}",
-                delta_color="off",
-            )
-            action_cards[1].metric(
-                "Baseline height",
-                f"{selected_risk['baseline_altitude_ft']:,.0f} ft",
-                f"{selected_risk['baseline_psf']:.3f} psf nominal",
-                delta_color="off",
-            )
-            action_cards[2].metric(
-                "Tested height",
-                f"{selected_risk['suggested_altitude_ft']:,.0f} ft",
-                f"{selected_risk['altitude_change_ft']:+,.0f} ft",
-                delta_color="off",
-            )
-            action_cards[3].metric(
-                "Recalculated surface",
-                f"{selected_risk['adjusted_psf']:.3f} psf",
-                f"screen {selected_risk['screening_upper_psf']:.3f} psf",
-                delta_color="off",
-            )
-            if selected_risk["screening_upper_psf"] <= threshold_psf:
-                st.success(
-                    f"PROPOSED RESEARCH CORRECTION · {selected_risk['action']}. "
-                    "The conservative screening envelope is below the research threshold. Validate performance, secondary rays, and the new near-field operating point before use."
-                )
-            else:
-                st.warning(
-                    f"NO TESTED SUPERSONIC HEIGHT CLEARS THIS REGION · {selected_risk['action']}. "
-                    "A lateral reroute or departure-time change requires fresh NOAA and terrain sampling and is not invented from the current route."
-                )
-            st.caption(selected_risk["reason"])
-        else:
-            st.success(
-                f"No modeled region exceeds {threshold_psf:.2f} psf nominal for {selected_label}. "
-                "The 1.50× screening margin is provisional and does not replace secondary-ray or validation evidence."
-            )
+        render_boom_risk_inspector(
+            risk_region_rows,
+            threshold_psf,
+            physical_state_key,
+            selected_candidate.candidate_id,
+        )
 
         result_cards = st.columns(4)
         result_cards[0].metric("Selected flight path", selected_label)
@@ -2215,127 +2403,7 @@ with boom_tab:
         profile_figure.update_yaxes(title_text="Terrain elevation (ft)", secondary_y=True)
         st.plotly_chart(profile_figure, width="stretch")
 
-        waveform_options = {
-            f"{sample.segment_id} · {_roll_label(sample.launch_roll_deg)} · {sample.cross_track_m / 1852:+.1f} nmi": sample
-            for sample in physical_profile
-        }
-        waveform_label = st.selectbox(
-            "Ground waveform", list(waveform_options), key="ground_waveform"
-        )
-        waveform = waveform_options[waveform_label]
-        waveform_figure = go.Figure()
-        reflection_factor = waveform.reflection_factor or 1.0
-        waveform_figure.add_trace(
-            go.Scatter(
-                x=[value * 1_000 for value in waveform.time_s],
-                y=[
-                    value / reflection_factor / PASCALS_PER_PSF
-                    for value in waveform.overpressure_pa
-                ],
-                mode="lines",
-                name="Incident at terrain",
-                line={"color": "#8fb9d9", "width": 1.8, "dash": "dot"},
-            )
-        )
-        waveform_figure.add_trace(
-            go.Scatter(
-                x=[value * 1_000 for value in waveform.time_s],
-                y=[value / PASCALS_PER_PSF for value in waveform.overpressure_pa],
-                mode="lines",
-                name=f"Ground pressure · rigid factor {reflection_factor:.1f}",
-                line={"color": "#30d5ff", "width": 2.8},
-            )
-        )
-        waveform_figure.add_hline(y=0, line_color="#8fa6b8")
-        waveform_figure.update_layout(
-            title=(
-                "Incident and rigid-ground waveform · "
-                f"{waveform.segment_id} · {_roll_label(waveform.launch_roll_deg)}"
-            ),
-            xaxis_title="Time (ms)",
-            yaxis_title="Surface overpressure (psf)",
-            template="plotly_dark",
-            height=390,
-            paper_bgcolor="#081524",
-            plot_bgcolor="#081524",
-            font={"color": "#e9f2ff"},
-            title_font={"color": "#ffffff", "size": 18},
-        )
-        ray_figure = go.Figure()
-        if waveform.ray_path_horizontal_m and waveform.ray_path_altitude_m:
-            ray_x_nmi = [value / 1852 for value in waveform.ray_path_horizontal_m]
-            ray_y_ft = [value * METERS_TO_FEET for value in waveform.ray_path_altitude_m]
-            ray_figure.add_trace(
-                go.Scatter(
-                    x=ray_x_nmi,
-                    y=ray_y_ft,
-                    mode="lines",
-                    name="Incident primary ray",
-                    line={"color": "#30d5ff", "width": 3},
-                )
-            )
-            ground_ft = waveform.terrain_elevation_m * METERS_TO_FEET
-            receiver_nmi = ray_x_nmi[-1]
-            reflected_horizontal_nmi = max(receiver_nmi * 0.22, 1.0)
-            incidence_deg = waveform.ground_incidence_deg or 0.0
-            reflected_altitude_ft = (
-                reflected_horizontal_nmi
-                * 1852
-                / max(math.tan(math.radians(incidence_deg)), 1e-6)
-                * METERS_TO_FEET
-            )
-            reflected_altitude_ft = min(
-                reflected_altitude_ft,
-                max(ray_y_ft[0] - ground_ft, 1.0),
-            )
-            ray_figure.add_trace(
-                go.Scatter(
-                    x=[receiver_nmi, receiver_nmi + reflected_horizontal_nmi],
-                    y=[ground_ft, ground_ft + reflected_altitude_ft],
-                    mode="lines",
-                    name="Specular reflection geometry",
-                    line={"color": "#ffd447", "width": 2.2, "dash": "dash"},
-                )
-            )
-            ray_figure.add_trace(
-                go.Scatter(
-                    x=[0, receiver_nmi, receiver_nmi + reflected_horizontal_nmi],
-                    y=[ground_ft, ground_ft, ground_ft],
-                    mode="lines",
-                    name="Local 3DEP terrain plane",
-                    fill="tozeroy",
-                    line={"color": "#8fa6b8", "width": 1.5},
-                    opacity=0.5,
-                )
-            )
-            ray_figure.add_trace(
-                go.Scatter(
-                    x=[0, receiver_nmi],
-                    y=[ray_y_ft[0], ground_ft],
-                    mode="markers",
-                    name="Aircraft / receiver",
-                    marker={"size": [11, 12], "color": ["#ffd447", "#ff5b79"]},
-                )
-            )
-        ray_figure.update_layout(
-            title="Ray–terrain intersection and reflection geometry",
-            xaxis_title="Horizontal distance from aircraft (nmi)",
-            yaxis_title="Altitude MSL (ft)",
-            template="plotly_dark",
-            height=430,
-            paper_bgcolor="#081524",
-            plot_bgcolor="#081524",
-            font={"color": "#e9f2ff"},
-            title_font={"color": "#ffffff", "size": 18},
-        )
-        visual_left, visual_right = st.columns(2)
-        with visual_left:
-            st.plotly_chart(ray_figure, width="stretch")
-        with visual_right:
-            st.plotly_chart(waveform_figure, width="stretch")
-        st.caption(
-            "The dashed reflected ray is geometric context for the declared rigid-ground pressure-doubling assumption. MachLane does not yet model frequency-dependent ground impedance, scattering, diffraction, or terrain shadowing."
-        )
+        render_ground_waveform_inspector(physical_profile, physical_state_key)
 
         if len(physical_result.candidates) > 1:
             if physical_result.solver.validation_status != "VALIDATED":
