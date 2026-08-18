@@ -18,8 +18,10 @@ from open_mco.aircraft import (
     AircraftWorkbookError,
     PhasePoint,
     PhaseTiming,
+    blank_aircraft_template_bytes,
     export_aircraft_definition_workbook,
     load_aircraft_definition_workbook,
+    load_bundled_lm1021,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -59,22 +61,47 @@ title, back = st.columns([5, 1], vertical_alignment="center")
 with title:
     st.markdown("# Aircraft")
     st.caption(
-        "Drop the LM1021, NASA STCA, or Boom/XB-1 Excel file. "
-        "MachLane detects and populates it."
+        "Load the bundled NASA LM1021 research case, or upload a completed MachLane workbook."
     )
 with back:
     st.markdown("[← **MISSION WORKSPACE**](/)")
 
-uploaded = st.file_uploader(
-    "DROP AIRCRAFT EXCEL HERE",
-    type=["xlsx", "xlsm"],
-    help=(
-        "Accepted: LM1021, NASA STCA, or the current Boom/XB-1 workbook contract. "
-        "MachLane never fills unsupported engineering values."
-    ),
-)
-
 definition: AircraftDefinition | None = None
+library_col, upload_col = st.columns(2, gap="large")
+with library_col:
+    st.markdown("### Ready research aircraft")
+    st.caption(
+        "NASA LM1021 · complete required MachLane fields · 3,725 near-field samples · "
+        "three NASA benchmark atmospheres."
+    )
+    if st.button("LOAD NASA LM1021", type="primary", width="stretch"):
+        try:
+            definition = load_bundled_lm1021()
+        except (AircraftWorkbookError, OSError) as exc:
+            st.error(f"Bundled LM1021 could not be loaded: {exc}")
+with upload_col:
+    st.markdown("### Upload another aircraft")
+    uploaded = st.file_uploader(
+        "DROP AIRCRAFT EXCEL HERE",
+        type=["xlsx", "xlsm"],
+        help=(
+            "Accepted: the current MachLane aircraft contract and supported legacy NASA STCA "
+            "or Boom/XB-1 workbooks. Missing engineering values remain missing."
+        ),
+    )
+    try:
+        template_payload = blank_aircraft_template_bytes()
+    except (AircraftWorkbookError, OSError) as exc:
+        st.error(f"Blank aircraft template is unavailable: {exc}")
+    else:
+        st.download_button(
+            "DOWNLOAD BLANK AIRCRAFT TEMPLATE",
+            template_payload,
+            file_name="MachLane_Aircraft_Template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            width="stretch",
+        )
+
 if uploaded is not None:
     try:
         definition = load_aircraft_definition_workbook(uploaded.getvalue())
@@ -89,8 +116,8 @@ if uploaded is not None:
 
 if definition is None:
     st.info(
-        "No aircraft is preloaded. Drop an LM1021, NASA STCA, or Boom/XB-1 "
-        "`.xlsx` or `.xlsm` file above."
+        "Choose NASA LM1021, or upload a completed `.xlsx`/`.xlsm` aircraft workbook. "
+        "The blank template contains the exact fields and completion instructions."
     )
     st.stop()
 active_definition = definition

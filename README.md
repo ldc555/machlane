@@ -17,7 +17,7 @@ high-speed flight analysis.
 | [NOAA HRRR](https://rapidrefresh.noaa.gov/hrrr/) via [Herbie](https://github.com/blaylockbk/Herbie) | Archived pressure-level atmosphere for routes entirely inside the reviewed CONUS coverage | Global coverage or surface boom overpressure |
 | [NOAA GEFS](https://www.emc.ncep.noaa.gov/emc/pages/numerical_forecast_systems/gefs.php) via Herbie | Archived pressure-level atmosphere for routes requiring global or oceanic coverage | A validated compliance or uncertainty result |
 | [USGS 3DEP](https://www.usgs.gov/3d-elevation-program) | Available U.S. terrain previews from the official elevation service | Propagation-grade global terrain or acoustic propagation |
-| [Aircraft workbook](#aircraft-files-download-drag-and-run) | Populated phase, Mach, altitude, geometry, performance, fuel, and acoustic inputs | Missing engineering values, a near-field signature, or certified limits |
+| [Aircraft workbook](#choose-an-aircraft-and-run) | Populated phase, Mach, altitude, geometry, performance, fuel, and acoustic inputs | Missing engineering values, a near-field signature, or certified limits |
 
 MachLane keeps the OpenSky historical route, the proposed high-speed flight, and a future compliant
 operating corridor as separate concepts. Atmospheric regions are not labeled as boom-safe areas.
@@ -34,7 +34,9 @@ You need:
 
 ### 2. Clone and install MachLane
 
-Open Terminal and run:
+#### macOS or Linux
+
+Open Terminal and run each line:
 
 ```bash
 git clone https://github.com/ldc555/machlane.git
@@ -47,6 +49,25 @@ python -m pip install -e ".[full,gis]"
 
 The first installation can take several minutes because it includes NOAA GRIB and GIS libraries.
 
+#### Windows Command Prompt
+
+Install [Git for Windows](https://git-scm.com/download/win) and Python 3.11 or newer. Open
+**Command Prompt** (`cmd`, not the Python console), then run each line separately:
+
+```bat
+cd %USERPROFILE%\Desktop
+git clone https://github.com/ldc555/machlane.git
+cd machlane
+py -3.11 -m venv .venv
+call .venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+python -m pip install -e ".[full,gis]"
+```
+
+The prompt should begin with `(.venv)`. If `py -3.11` is unavailable but `python --version`
+reports Python 3.11 or newer, use `python -m venv .venv` instead. Do not combine the virtual-
+environment creation and activation commands on one line.
+
 If the GRIB/GIS installation fails, use the supplied Conda environment instead:
 
 ```bash
@@ -54,7 +75,7 @@ conda env create -f environment.yml
 conda activate machlane
 ```
 
-If you use Conda, replace `source .venv/bin/activate` in the later commands with
+If you use Conda, replace the platform-specific activation command below with
 `conda activate machlane`.
 
 ### 3. Configure OpenSky once
@@ -75,8 +96,12 @@ See the [official OpenSky authentication documentation](https://openskynetwork.g
 
 ### 4. Save the keys and start MachLane
 
-On macOS using the default zsh Terminal, replace `/path/to/your/machlane` with the location of your
-cloned repository, then paste this complete block:
+The credentials are stored only in `.streamlit/secrets.toml`, which is git-ignored. Every user must
+use their own OpenSky client; never commit or share this file.
+
+#### macOS using zsh
+
+Replace `/path/to/your/machlane` with the cloned repository location, then paste this block:
 
 ```bash
 cd /path/to/your/machlane
@@ -90,9 +115,26 @@ chmod 600 .streamlit/secrets.toml
 streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 8501
 ```
 
-Paste the ID and secret **without adding quotes** when Terminal asks for them. The secret remains
-hidden while you type. The credentials are saved locally, so this setup is required only once.
-The generated file is git-ignored; never commit or share it.
+Paste the ID and secret **without adding quotes**. The secret remains hidden while you type.
+
+#### Windows Command Prompt
+
+If the repository is on the Desktop, open Command Prompt and run each line separately. Paste the
+client ID and secret without adding quotes when prompted:
+
+```bat
+cd %USERPROFILE%\Desktop\machlane
+call .venv\Scripts\activate.bat
+if not exist .streamlit mkdir .streamlit
+set /p "OPENSKY_CLIENT_ID=OpenSky client ID: "
+set /p "OPENSKY_CLIENT_SECRET=OpenSky client secret: "
+> .streamlit\secrets.toml echo OPENSKY_CLIENT_ID = "%OPENSKY_CLIENT_ID%"
+>> .streamlit\secrets.toml echo OPENSKY_CLIENT_SECRET = "%OPENSKY_CLIENT_SECRET%"
+python -m streamlit run src\open_mco\ui\app.py --server.address localhost --server.port 8501
+```
+
+Command Prompt displays the secret while it is entered, so do this privately. The saved file means
+the keys are entered only once.
 
 NOAA HRRR/GEFS and USGS 3DEP do not require keys. ERA5 is optional and is not required to start the
 current workspace.
@@ -116,40 +158,48 @@ streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 85
 
 Then visit [http://localhost:8502](http://localhost:8502).
 
-## Aircraft files: download, drag, and run
+## Choose an aircraft and run
 
-Use these aircraft workbooks:
+MachLane ships with two source-controlled files:
 
-- [NASA ST55 aircraft workbook](https://docs.google.com/spreadsheets/d/1p1tlfufxCVTymZm1oD5O2wBbNvwS_uMJ/edit?usp=share_link&ouid=103289146496595000341&rtpof=true&sd=true) — **use this now**.
-- [Boom XB-1 aircraft workbook](https://docs.google.com/spreadsheets/d/17kS5a2LK2SAAHgEADfnvreDiwKyPZRlu/edit?usp=share_link&ouid=103289146496595000341&rtpof=true&sd=true) — **use only when its missing aircraft and phase data are completed**.
+| File | Purpose |
+|---|---|
+| [NASA LM1021 research aircraft](aircraft_database/LM1021/LM1021.xlsx) | Ready first-screen research case with the MachLane fields, 10 phases, four source-anchored performance points, 3,725 NASA SBPW2 near-field samples, and three benchmark atmospheres |
+| [Blank MachLane aircraft template](aircraft_database/templates/MachLane_Aircraft_Template.xlsx) | Downloadable schema and completion prompts for a different aircraft; no unsupported engineering values are prefilled |
 
-Follow these steps:
+### Fast path: bundled NASA LM1021
 
-1. Open the NASA ST55 link above.
-2. In Google Sheets, select **File → Download → Microsoft Excel (.xlsx)**.
-3. Return to [MachLane](http://localhost:8501).
-4. Click **Load aircraft**.
-5. Drag the downloaded `.xlsx` file into **Drop aircraft Excel here**.
-6. Wait for validation, then confirm that the NASA ST55 fields and 10 flight phases appear.
-7. Click **Save aircraft & open routes**.
-8. Select **DFW → JFK** or **LAX → JFK** under **Mission**.
-9. Select an **Observed OpenSky flight**. The list contains only real matching departures, shown
+1. Open [MachLane](http://localhost:8501).
+2. Click **Load NASA LM1021** on the first screen. MachLane validates and activates the repository
+   copy locally; no manual upload is required.
+3. Select **DFW → JFK** or **LAX → JFK** under **Mission**.
+4. Select an **Observed OpenSky flight**. The list contains only real matching departures, shown
    with their callsign and actual UTC departure time; MachLane never searches backward from an
    arbitrary date or substitutes a different flight.
-10. Click **Run analysis**.
-11. Let the analysis finish without closing the Terminal or browser. MachLane loads the real
+5. Click **Run analysis**.
+6. Let the analysis finish without closing the Terminal or browser. MachLane loads the real
     OpenSky track, matches NOAA weather across the flight, checks available 3DEP terrain, and forms
-    automatic atmospheric regions. With the LM1021 workbook it also runs the open primary-ray
-    research solver over propagation-eligible regions.
-12. Use the aircraft-position slider to inspect phase, Mach, altitude, speed, pressure, temperature,
+   automatic atmospheric regions, then runs the open primary-ray research solver where the LM1021
+   signature is condition-matched.
+7. Use the aircraft-position slider to inspect phase, Mach, altitude, speed, pressure, temperature,
     wind, and atmospheric region. Use the lower tabs for provenance and exportable evidence.
+
+### Another aircraft
+
+1. Click **Upload or build another aircraft** on the first screen.
+2. Click **Download blank aircraft template**.
+3. Fill the workbook in Excel. Its README and Completion_Status sheets identify every required
+   value, source field, performance/fuel row, phase input, and near-field input.
+4. Return to MachLane and drag the completed `.xlsx` or `.xlsm` file into **Drop aircraft Excel
+   here**.
+5. Review the imported fields, then click **Save aircraft & open routes**.
+
+MachLane accepts supported legacy NASA STCA and Boom/XB-1 workbooks through the same upload page,
+but it will not invent missing performance, fuel, phase, or near-field data.
 
 The first analysis can take several minutes because NOAA files must be downloaded and decoded.
 Later runs reuse local caches. A cached OpenSky route contains only the observed trajectory; weather
 and terrain are loaded separately.
-
-The Boom XB-1 workbook uses the same drag-and-drop process once it is complete. MachLane will save
-an incomplete workbook, but it will not invent a phase profile or start route modeling from one.
 
 ## Physical sonic-boom calculation
 
@@ -225,10 +275,20 @@ solver must be marked `VALIDATED`.
 
 ## Restart later
 
+macOS or Linux:
+
 ```bash
 cd /path/to/your/machlane
 source .venv/bin/activate
-streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 8501
+python -m streamlit run src/open_mco/ui/app.py --server.address localhost --server.port 8501
+```
+
+Windows Command Prompt:
+
+```bat
+cd %USERPROFILE%\Desktop\machlane
+call .venv\Scripts\activate.bat
+python -m streamlit run src\open_mco\ui\app.py --server.address localhost --server.port 8501
 ```
 
 The saved OpenSky credentials do not need to be entered again.

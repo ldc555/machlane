@@ -22,9 +22,12 @@ from plotly.subplots import make_subplots
 from open_mco.aircraft import (
     AircraftDefinition,
     AircraftStore,
+    AircraftWorkbookError,
     FlightPlanEstimate,
     SceneEnvironment,
+    blank_aircraft_template_bytes,
     estimate_flight_plan,
+    load_bundled_lm1021,
     speed_of_sound_knots,
 )
 from open_mco.mission_analysis import (
@@ -753,19 +756,59 @@ if selected_aircraft is None:
         """
 <div class="empty-state">
   <div class="eyebrow">FIRST STEP</div>
-  <h2>Load one aircraft workbook</h2>
-  <p>MachLane will validate it, populate the aircraft workspace, and save a normalized local copy before any route analysis can run.</p>
+  <h2>Choose the aircraft</h2>
+  <p>Start immediately with the bundled NASA LM1021 research case, or upload the same workbook schema for another aircraft.</p>
 </div>
 """,
         unsafe_allow_html=True,
     )
-    _, load_aircraft, _ = st.columns([1.35, 1, 1.35])
-    with load_aircraft:
+    bundled_aircraft, another_aircraft = st.columns(2, gap="large")
+    with bundled_aircraft:
+        st.markdown("### NASA LM1021")
+        st.caption(
+            "Repository-backed research aircraft · complete MachLane fields · "
+            "NASA SBPW2 near-field and benchmark atmospheres."
+        )
+        if st.button(
+            "LOAD NASA LM1021",
+            type="primary",
+            width="stretch",
+            help="Loads and locally activates the reviewed workbook committed with MachLane.",
+        ):
+            try:
+                bundled_definition = load_bundled_lm1021()
+                AIRCRAFT_STORE.save(bundled_definition)
+            except (AircraftWorkbookError, OSError, ValueError) as exc:
+                st.error(f"Bundled LM1021 could not be loaded: {exc}")
+            else:
+                st.session_state["active_aircraft_checksum"] = (
+                    bundled_definition.workbook_checksum
+                    or f"revision-{bundled_definition.revision}"
+                )
+                st.rerun()
+    with another_aircraft:
+        st.markdown("### Another aircraft")
+        st.caption(
+            "Upload a completed MachLane workbook, or download the blank, source-traceable "
+            "template and fill it in Excel."
+        )
         st.page_link(
             "pages/1_Aircraft_Specificity.py",
-            label="LOAD AIRCRAFT",
+            label="UPLOAD OR BUILD ANOTHER AIRCRAFT →",
             width="stretch",
         )
+        try:
+            template_payload = blank_aircraft_template_bytes()
+        except (AircraftWorkbookError, OSError) as exc:
+            st.error(f"Blank aircraft template is unavailable: {exc}")
+        else:
+            st.download_button(
+                "DOWNLOAD BLANK AIRCRAFT TEMPLATE",
+                template_payload,
+                file_name="MachLane_Aircraft_Template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width="stretch",
+            )
     st.stop()
 
 assert selected_aircraft is not None
@@ -975,7 +1018,9 @@ pressure_min = min(pressure_values) - 0.5
 pressure_max = max(pressure_values) + 0.5
 for row in rows:
     row["color"] = pressure_color(float(row["pressure_hpa"]), pressure_min, pressure_max)
-    row["zone_fill_color"] = [*row["color"][:3], 42]
+    # Keep the pressure overlay subordinate to the exact OpenSky track.  A wide,
+    # opaque band obscures both the geography and the research-only boom marks.
+    row["zone_fill_color"] = [*row["color"][:3], 12]
     row["zone_edge_color"] = [*row["color"][:3], 238]
 
 route_distance_miles = route_distance_m(observed_route) * METERS_TO_MILES
@@ -1539,10 +1584,10 @@ atmosphere_layers = [
         id="automatic-atmospheric-region-fill",
         get_path="path",
         get_color="zone_fill_color",
-        get_width=22,
+        get_width=9,
         width_units="pixels",
-        width_min_pixels=18,
-        width_max_pixels=26,
+        width_min_pixels=7,
+        width_max_pixels=11,
         pickable=False,
     ),
     pdk.Layer(
@@ -1631,10 +1676,10 @@ if adaptive_change_rows:
         adaptive_change_rows,
         id="adaptive-height-research-corridor",
         get_path="path",
-        get_color=[45, 240, 207, 225],
-        get_width=9,
+        get_color=[45, 240, 207, 72],
+        get_width=4,
         width_units="pixels",
-        width_min_pixels=7,
+        width_min_pixels=3,
         pickable=True,
     )
 if physical_result is not None:
